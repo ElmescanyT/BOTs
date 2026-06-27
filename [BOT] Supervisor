@@ -1,0 +1,110 @@
+import discord
+from discord.ext import commands
+import asyncio
+
+intents = discord.Intents.default()
+intents.members = True           
+intents.message_content = True   
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Somente quem tiver ESSE cargo pode usar
+ROLE_ID_AUTORIZADO = 1411847121560141976 
+
+@bot.command(name="eu")
+async def eu(ctx, canal: discord.TextChannel, *, mensagem: str = None):
+    # Verificação de cargo
+    cargo_autorizado = ctx.guild.get_role(ROLE_ID_AUTORIZADO)
+    if cargo_autorizado not in ctx.author.roles:
+        return await ctx.reply("🚫 Você não tem o cargo necessário para usar este comando.", mention_author=False)
+
+    arquivos = []
+    for anexo in ctx.message.attachments:
+        arquivo = await anexo.to_file()
+        arquivos.append(arquivo)
+
+    if not mensagem and not arquivos:
+        return await ctx.reply("⚠️ Você precisa enviar um texto ou anexos.", mention_author=False)
+
+    if mensagem and len(mensagem) > 2000:
+        return await ctx.reply("⚠️ O texto não pode ultrapassar 2.000 caracteres.", mention_author=False)
+
+    if mensagem:
+        texto_final = f"{mensagem}\n\n"
+
+    await canal.send(content=texto_final, files=arquivos)
+
+    # Deleta a mensagem original do comando
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+    # Confirmação via DM pra não sujar o chat
+    try:
+        await ctx.author.send(f"✅ Sua mensagem foi enviada em {canal.mention}.")
+    except:
+        pass
+        
+# IDs dos cargos que podem usar o comando
+ALLOWED_ROLES = [
+    1411847121560141976
+]
+
+@bot.command(name="dar_cargo")
+async def dar_cargo(ctx, *, args=None):
+    if not any(role.id in ALLOWED_ROLES for role in ctx.author.roles):
+        return await ctx.reply("❌ Você não tem permissão para usar este comando.")
+
+    if not args:
+        return await ctx.reply("❌ Uso correto: `!dar_cargo @membro1 @membro2 ... @membroFinal. @cargo Motivo`")
+
+    # Separa as partes do comando
+    mentions = ctx.message.mentions
+    role = None
+    motivo = None
+
+    if not mentions:
+        return await ctx.reply("❌ Você precisa mencionar pelo menos um membro.")
+
+    # Pega o último mention (depois do ponto final) como cargo
+    if ctx.message.role_mentions:
+        role = ctx.message.role_mentions[-1]
+    else:
+        return await ctx.reply("❌ Você precisa mencionar o cargo a ser atribuído.")
+
+    # Motivo é o resto da mensagem depois do cargo
+    split_msg = args.split(">")
+    if len(split_msg) > len(mentions) + 1:  # Garante que tem motivo
+        motivo = split_msg[-1].strip()
+    else:
+        motivo = "Não especificado"
+
+    membros = mentions
+    total = len(membros)
+
+    # Mensagem inicial
+    status_msg = await ctx.send(f"⏳ Iniciando entrega do cargo **{role.name}** para {total} membros...\nMotivo: *{motivo}*")
+
+    entregues = 0
+    await asyncio.sleep(30)  # Espera proposital
+
+    for membro in membros:
+        try:
+            await membro.add_roles(role, reason=f"Pedido por {ctx.author} | Motivo: {motivo}")
+            entregues += 1
+        except Exception as e:
+            await ctx.send(f"⚠️ Não consegui adicionar o cargo para {membro.mention}: {e}")
+
+        # Atualiza a mensagem de progresso
+        await status_msg.edit(content=f"✍️ Entregando cargos...\n> {entregues}/{total} concluídos. ⚙️")
+
+        await asyncio.sleep(2)  # delay entre cada entrega pra simular "processo"
+
+    # Finalização
+    await status_msg.edit(content="⚙️ Finalizando revisão...")  
+    await asyncio.sleep(3)
+
+    mencoes = ", ".join([m.mention for m in membros])
+    await status_msg.edit(content=f"✅ O cargo **{role.name}** foi entregue para os membros {mencoes} a pedido de {ctx.author.mention}.\n📌 Motivo: *{motivo}*")
+    
+bot.run("x")
