@@ -1,0 +1,2028 @@
+import discord
+import random
+import json
+import os
+import traceback
+import aiohttp
+import math
+import re
+
+from discord.ext import commands
+from discord.ui import View, Button, Modal, TextInput
+from datetime import datetime
+
+# --- Configurações do Bot e Intents ---
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- IDs e Constantes ---
+CLEA_ROLE_ID = 1365423453850697868
+SOLICITANTE_ROLE_ID = 1376360065858011296
+AUTORIZADOS_TAREFA = [1326293254898974720, 1326296455287148645, 1371236740601348228]
+CANAL_REVISAO_TAREFA = 1358842877907570860
+
+# Configurações das turmas, incluindo IDs de canais e menções.
+TURMAS = {
+    "01": {"canal_id": 1326316405812891658, "mencao_id": 1326298654729961493},
+    "02": {"canal_id": 1326325811837534339, "mencao_id": 1326298878898602105}
+}
+
+# IDs de Grupos Roblox
+GRUPO_EB = 11511508
+GRUPO_CLEA = 35671927
+
+# Cargos autorizados para comandos de vincular/info_militar 
+CARGOS_AUTORIZADOS_DEV = [1326293254898974720, 1333955695061631026, CLEA_ROLE_ID]
+
+# Cargos autorizados para ver relatórios de erros/PPF (Coordenação, Diretoria, Supervisão)
+CARGOS_AUTORIZADOS_CLEA_GESTAO = [1326296455287148645, 1326293254898974720, 1371236740601348228]
+
+# Arquivos de dados
+VINCULOS_FILE = "vinculos.json"
+PPF_AUTORIZACOES_FILE = "ppf_autorizacoes.json"
+ERROS_FILE = "erros_gramaticais.json"
+
+# --- Inicialização de Arquivos de Dados ---
+# Garante que os arquivos JSON existam ao iniciar o bot
+for file_path in [VINCULOS_FILE, PPF_AUTORIZACOES_FILE, ERROS_FILE]:
+    if not os.path.exists(file_path):
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
+# --- Frases Personalizadas ---
+autorizado_frases = [
+    "Recruta, meu superior {superior} autorizou sua permissão. Desembuche.",
+    "Reservista de espírito, {superior} liberou. Diga o que deseja.",
+    "Figura, o escalão maior {superior} aprovou. Fale.",
+    "Operador, {superior} permitiu sua fala. Prossiga.",
+    "Entidade, liberação concedida por {superior}. Apresente-se."
+]
+
+negado_frases = [
+    "Rascunho de militar, {superior} negou sua permissão. Recolha-se.",
+    "Pessoa, ordem direta do {superior}: NEGADO.",
+    "Elemento, seu pedido foi reprovado por {superior}. Silêncio.",
+    "Solicitante, {superior} barrou sua tentativa. Fora de forma.",
+    "Tampa de marmita, {superior} disse não. Volte para o canto."
+]
+
+# --- Funções Auxiliares de Permissão ---
+def has_clea_role(member):
+    return any(role.id == CLEA_ROLE_ID for role in member.roles)
+
+def has_solicitante_role(member):
+    return any(role.id == SOLICITANTE_ROLE_ID for role in member.roles)
+
+def has_dev_permission(member):
+    return any(role.id in CARGOS_AUTORIZADOS_DEV for role in member.roles)
+
+def has_clea_gestao_permission(member):
+    return any(role.id in CARGOS_AUTORIZADOS_CLEA_GESTAO for role in member.roles)
+
+# --- Funções para Manipulação de Dados (JSON) ---
+def carregar_json(filepath):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def salvar_json(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2) # ensure_ascii=False para acentos
+
+def salvar_vinculo(discord_id, roblox_id):
+    data = carregar_json(VINCULOS_FILE)
+    data[str(discord_id)] = roblox_id
+    salvar_json(VINCULOS_FILE, data)
+
+def registrar_ppf_autorizacao(user_id):
+    data = carregar_json(PPF_AUTORIZACOES_FILE)
+    data[str(user_id)] = data.get(str(user_id), 0) + 1
+    salvar_json(PPF_AUTORIZACOES_FILE, data)
+
+# --- Funções de Requisição Roblox API ---
+async def get_roblox_data(username):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [username]}
+        ) as r:
+            data = await r.json()
+            if data.get("data") and len(data["data"]) > 0:
+                return data["data"][0]
+            return None
+
+async def get_user_data(roblox_id):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}") as r:
+            if r.status != 200:
+                return None
+            return await r.json()
+
+async def get_group_rank(user_id, group_id):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://groups.roblox.com/v1/users/{user_id}/groups") as r:
+            if r.status != 200:
+                print(f"[ERRO] Status {r.status} ao buscar grupos de {user_id}")
+                return None
+            data = await r.json()
+
+            if 'data' not in data:
+                return None
+
+            for group_info in data['data']:
+                group = group_info.get("group")
+                role = group_info.get("role")
+                if group and role and group.get("id") == group_id:
+                    return role.get("name") # Retorna o nome do cargo
+            return None
+
+# --- Views Interativas ---
+class PPFView(View):
+    def __init__(self, autor_msg):
+        super().__init__(timeout=None)
+        self.autor_msg = autor_msg
+        self.acao_realizada = False
+
+    def disable_all(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="✅ Autorizar", style=discord.ButtonStyle.success)
+    async def aceitar(self, interaction: discord.Interaction, button: Button):
+        if self.acao_realizada:
+            return await interaction.response.send_message("❗ Esta solicitação já foi respondida.", ephemeral=True)
+        if not has_clea_role(interaction.user):
+            return await interaction.response.send_message("⛔ Você não tem permissão para isso.", ephemeral=True)
+
+        # Registrar a autorização
+        registrar_ppf_autorizacao(interaction.user.id)
+
+        frase = random.choice(autorizado_frases).format(superior=interaction.user.mention)
+        embed = discord.Embed(description=f"{self.autor_msg.mention}, {frase}", color=0x2ECC71)
+        await interaction.channel.send(embed=embed)
+
+        button.label = f"✅ Autorizado por {interaction.user.display_name}"
+        self.disable_all()
+        self.acao_realizada = True
+        await interaction.message.edit(view=self)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="❌ Negar", style=discord.ButtonStyle.danger)
+    async def negar(self, interaction: discord.Interaction, button: Button):
+        if self.acao_realizada:
+            return await interaction.response.send_message("❗ Esta solicitação já foi respondida.", ephemeral=True)
+        if not has_clea_role(interaction.user):
+            return await interaction.response.send_message("⛔ Você não tem permissão para isso.", ephemeral=True)
+
+        frase = random.choice(negado_frases).format(superior=interaction.user.mention)
+        embed = discord.Embed(
+            title="❌ Permissão Negada",
+            description=f"{self.autor_msg.mention}, {frase}",
+            color=0xE74C3C
+        )
+        button.label = f"❌ Negado por {interaction.user.display_name}"
+        self.disable_all()
+        self.acao_realizada = True
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(embed=embed)
+
+class AutorizacaoTarefa(View):
+    def __init__(self, canal_final, mencao, embed_original):
+        super().__init__(timeout=None)
+        self.acao_realizada = False
+        self.canal_final = canal_final
+        self.mencao = mencao
+        self.embed_original = embed_original
+
+    def disable_all(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="✅ Autorizar", style=discord.ButtonStyle.success)
+    async def autorizar(self, interaction: discord.Interaction, button: Button):
+        if self.acao_realizada:
+            return await interaction.response.send_message("Esta tarefa já foi respondida.", ephemeral=True)
+        if not has_clea_role(interaction.user):
+            return await interaction.response.send_message("⛔ Sem permissão.", ephemeral=True)
+        
+        self.acao_realizada = True
+        button.label = f"✅ Autorizado por {interaction.user.display_name}"
+        self.disable_all()
+        await self.canal_final.send(content=self.mencao, embed=self.embed_original)
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message("✅ Tarefa enviada ao canal da turma!", ephemeral=True)
+
+    @discord.ui.button(label="❌ Negar", style=discord.ButtonStyle.danger)
+    async def negar(self, interaction: discord.Interaction, button: Button):
+        if self.acao_realizada:
+            return await interaction.response.send_message("Esta tarefa já foi respondida.", ephemeral=True)
+        if not has_clea_role(interaction.user):
+            return await interaction.response.send_message("⛔ Sem permissão.", ephemeral=True)
+        
+        self.acao_realizada = True
+        button.label = f"❌ Negado por {interaction.user.display_name}"
+        self.disable_all()
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message("❌ Tarefa negada com sucesso.", ephemeral=True)
+
+# --- Eventos do Bot ---
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.content.strip().upper() == "PPF!":
+        if has_clea_role(message.author):
+            embed = discord.Embed(
+                title="📛 Confusão Hierárquica Detectada",
+                description=f"{message.author.mention}, você é quem **autoriza** a permissão.\nSolicitar PPF sendo do CLEA é como o General pedir permissão ao soldado. Volte ao seu posto.",
+                color=0xF1C40F
+            )
+            embed.set_footer(text="Sistema de PPF • CLEA")
+            return await message.channel.send(embed=embed)
+
+        if has_solicitante_role(message.author):
+            view = PPFView(message.author)
+            embed = discord.Embed(
+                title="📢 Solicitação de PPF Detectada",
+                description="Clique em ✅ para **autorizar** ou ❌ para **negar** a permissão.",
+                color=0x3498DB
+            )
+            embed.set_footer(text="Somente membros do CLEA podem reagir.")
+            return await message.channel.send(embed=embed, view=view)
+
+    await bot.process_commands(message)
+
+@bot.event
+async def on_ready():
+    print(f"🤖 Bot online como {bot.user}!")
+    print("--- IDs das Turmas Carregados ---")
+    for turma, config in TURMAS.items():
+        print(f"Turma {turma}: Canal ID = {config['canal_id']}, Menção ID = {config['mencao_id']}")
+    print("---------------------------------")
+
+
+# --- Comandos do Bot ---
+@bot.command()
+async def agendar_aula(ctx, turma: str, responsavel: str, auxiliares: str, tipo: str, horario: str, *, codigo: str):
+    turma = turma.strip("Tt")
+    if turma not in TURMAS:
+        return await ctx.reply(embed=discord.Embed(description=f"❌ Turma inválida. Disponíveis: {', '.join(TURMAS.keys())}", color=0xE74C3C))
+
+    canal_id = TURMAS[turma]["canal_id"]
+    mencao_id = TURMAS[turma]["mencao_id"]
+    canal = ctx.guild.get_channel(canal_id)
+    mencao = f"<@&{mencao_id}>"
+
+    if not canal:
+        return await ctx.reply(embed=discord.Embed(description="❌ Canal da turma não encontrado. Verifique se o ID está correto ou se o bot tem permissão.", color=0xE74C3C))
+
+    if codigo.lower().strip() == "discord":
+        link = f"https://discord.com/channels/{ctx.guild.id}/{canal.id}"
+        canal_info = f"[🔗 Acesse a aula]({link})"
+    else:
+        canal_info = codigo
+
+    embed = discord.Embed(
+        title="📚 | ANÚNCIO DE AULA!",
+        description=(
+            f"**Horário:**\n**{horario}**\n"
+            f"**Instrutor(es):**\n**{responsavel}**\n"
+            f"**Auxiliar(es):**\n**{auxiliares}**\n"
+            f"**Tipo de aula:**\n**{tipo}**\n"
+            f"**Código/Canal:**\n{canal_info}\n"
+            f"**Menção:**\n{mencao}"
+        ),
+        color=0x2ECC71
+    )
+    embed.set_footer(text=f"Aula agendada por {ctx.author.display_name}")
+    await canal.send(content=mencao, embed=embed)
+    await ctx.reply(embed=discord.Embed(description="✅ Aula agendada com sucesso!", color=0x2ECC71))
+
+@bot.command()
+async def agendar_tarefa(ctx, turma: str, responsavel: str, *, dados: str):
+    turma = turma.strip("Tt")
+    if turma not in TURMAS:
+        return await ctx.reply(embed=discord.Embed(description=f"❌ Turma inválida. Disponíveis: {', '.join(TURMAS.keys())}", color=0xE74C3C))
+
+    partes = [p.strip() for p in dados.split("|")]
+    if len(partes) < 3:
+        return await ctx.reply(embed=discord.Embed(description="❌ Formato inválido. Use: Tarefa | Início | Fim", color=0xE74C3C))
+
+    tarefa, inicio, fim = partes[0], partes[1], partes[2]
+
+    canal_id = TURMAS[turma]["canal_id"]
+    mencao_id = TURMAS[turma]["mencao_id"]
+    canal_final = ctx.guild.get_channel(canal_id)
+    canal_autorizar = ctx.guild.get_channel(CANAL_REVISAO_TAREFA)
+    mencao = f"<@&{mencao_id}>"
+    data = datetime.utcnow().strftime("%d/%m/%Y")
+
+    embed_tarefa = discord.Embed(
+        title="📘 | Tarefa da Turma!",
+        description=(
+            f"**Instrutor Responsável:**\n**{responsavel}**\n"
+            f"**Tarefa:**\n**{tarefa}**\n"
+            f"**Início do prazo:**\n**{inicio}**\n"
+            f"**Fim do prazo:**\n**{fim}**\n"
+            f"**Menção:**\n{mencao}\n"
+            f"**Data:**\n{data}"
+        ),
+        color=0x3498DB
+    )
+    embed_tarefa.set_footer(text=f"Enviado por {ctx.author.display_name}")
+
+    if any(role.id in AUTORIZADOS_TAREFA for role in ctx.author.roles):
+        await canal_final.send(content=mencao, embed=embed_tarefa)
+        await ctx.reply(embed=discord.Embed(description="✅ Tarefa enviada com sucesso!", color=0x2ECC71))
+    elif has_clea_role(ctx.author):
+        view_autorizacao = AutorizacaoTarefa(canal_final, mencao, embed_tarefa)
+        await canal_autorizar.send(embed=embed_tarefa, view=view_autorizacao)
+        await ctx.reply(embed=discord.Embed(description="📨 Enviado para autorização do CLEA.", color=0xF1C40F))
+    else:
+        await ctx.reply(embed=discord.Embed(description="❌ Você não possui permissão para enviar tarefas.", color=0xE74C3C))
+
+@bot.command()
+async def manual(ctx):
+    embed = discord.Embed(
+        title="📘 MANUAL GERAL — SISTEMA CLEA",
+        description="Consulte abaixo os manuais disponíveis para operar corretamente os sistemas do CLEA.",
+        color=0x1F8B4C
+    )
+
+    embed.add_field(
+        name="📚 Aulas",
+        value="Use `!manual_aula` para visualizar como agendar aulas por turma.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📝 Tarefas",
+        value="Use `!manual_tarefa` para visualizar como agendar tarefas e enviar para revisão.",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🛠️ Dev",
+        value="Use `!manual_dev` para comandos de desenvolvedor e administração.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📊 Relatórios",
+        value="Use `!manual_erros` para ver comandos de monitoramento de desempenho e erros.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📎 Observação",
+        value="Novos manuais serão adicionados conforme necessário. Consulte este manual com `!manual` sempre que tiver dúvidas.",
+        inline=False
+    )
+
+    embed.set_footer(text="Central de Manuais • CLEA")
+    await ctx.reply(embed=embed)
+
+@bot.command()
+async def manual_aula(ctx):
+    embed = discord.Embed(
+        title="📘 Manual de Agendamento de Aula",
+        description="Use o comando abaixo para agendar aulas automaticamente por turma.",
+        color=0x3498DB
+    )
+    embed.add_field(
+        name="📥 Comando:",
+        value="`!agendar_aula (Turma) (Instrutor) (Auxiliares) (Tipo) (Horário) (Código)`",
+        inline=False
+    )
+    embed.add_field(
+        name="📌 Exemplo:",
+        value="`!agendar_aula T01 @SgtJoao @CbLucas Voz 20:00 discord`",
+        inline=False
+    )
+    embed.add_field(
+        name="📎 Observações:",
+        value=(
+            "- O canal e a menção são automáticos pela turma.\n"
+            "- Se usar `discord` como código, o bot gera o link direto para o canal.\n"
+            "- Tipos: Prática, Teórica, Em voz, etc.\n"
+            "- Auxiliares podem ser menções ou nomes."
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Sistema de Aulas • CLEA")
+    await ctx.reply(embed=embed)
+
+@bot.command()
+async def manual_tarefa(ctx):
+    embed = discord.Embed(
+        title="📘 Manual de Agendamento de Tarefa",
+        description="Use o comando abaixo para agendar tarefas para cada turma.",
+        color=0x3498DB
+    )
+    embed.add_field(
+        name="📥 Comando:",
+        value="`!agendar_tarefa (Turma) (Responsável) (Tarefa | Início | Fim)`",
+        inline=False
+    )
+    embed.add_field(
+        name="📌 Exemplo:",
+        value="`!agendar_tarefa T02 @1TenVictor Patrulhamento no mapa | 09/07 | 10/07`",
+        inline=False
+    )
+    embed.add_field(
+        name="📎 Observações:",
+        value=(
+            "- O canal e a menção são automáticos pela turma.\n"
+            "- Tarefa será enviada diretamente apenas por cargos autorizados.\n"
+            "- Os demais passarão pela autorização do CLEA."
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Sistema de Tarefas • CLEA")
+    await ctx.reply(embed=embed)
+
+@bot.command()
+async def vincular(ctx, membro: discord.Member, username: str):
+    if not has_dev_permission(ctx.author):
+        embed = discord.Embed(description="❌ Você não tem permissão para usar este comando.", color=0xff0000)
+        return await ctx.send(embed=embed)
+
+    user_data = await get_roblox_data(username)
+    if not user_data:
+        embed = discord.Embed(description="❌ Nome de usuário Roblox inválido ou não encontrado.", color=0xff0000)
+        return await ctx.send(embed=embed)
+
+    roblox_id = user_data["id"]
+    salvar_vinculo(membro.id, roblox_id)
+
+    embed = discord.Embed(title="🔗 Vinculação Realizada com Sucesso", color=0x2ecc71)
+    embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={roblox_id}&width=150&height=150&format=png")
+    embed.add_field(name="👤 Discord", value=f"{membro.mention} (`{membro.id}`)", inline=False)
+    embed.add_field(name="🎮 Roblox", value=f"{username} (`{roblox_id}`)", inline=False)
+    embed.add_field(name="🌐 Perfil", value=f"[Abrir perfil](https://www.roblox.com/users/{roblox_id}/profile)", inline=False)
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def info_militar(ctx, membro: discord.Member):
+    if not has_dev_permission(ctx.author):
+        embed = discord.Embed(description="❌ Você não tem permissão para usar este comando.", color=0xff0000)
+        return await ctx.send(embed=embed)
+
+    embed_loading = discord.Embed(description="🔎 **Buscando informações... Aguarde.**", color=0xffd700)
+    msg = await ctx.send(embed=embed_loading)
+
+    try:
+        discord_id = membro.id
+        vinculos = carregar_json(VINCULOS_FILE)
+        roblox_id = vinculos.get(str(discord_id))
+
+        if not roblox_id:
+            embed = discord.Embed(description="❌ Este membro não tem uma conta Roblox vinculada.", color=0xff0000)
+            return await msg.edit(embed=embed)
+
+        roblox_info = await get_user_data(roblox_id)
+        if roblox_info is None:
+            embed = discord.Embed(description="❌ Não foi possível obter os dados do Roblox. Verifique o ID ou a API do Roblox.", color=0xff0000)
+            return await msg.edit(embed=embed)
+
+        roblox_created_str = roblox_info.get("created", "Desconhecido")
+        joined_roblox = "Desconhecido"
+        if roblox_created_str != "Desconhecido":
+            try:
+                dt_object = datetime.fromisoformat(roblox_created_str.replace('Z', '+00:00'))
+                joined_roblox = dt_object.strftime("%d/%m/%Y %H:%M")
+            except ValueError:
+                pass
+
+        joined_discord = "Desconhecido"
+        if membro.joined_at:
+            joined_discord = membro.joined_at.strftime("%d/%m/%Y %H:%M")
+
+        cargo_eb = await get_group_rank(roblox_id, GRUPO_EB)
+        cargo_clea = await get_group_rank(roblox_id, GRUPO_CLEA)
+
+        cargo_eb_display = f"**{cargo_eb}**" if cargo_eb else "❌ Não pertence ao grupo EB"
+        cargo_clea_display = f"**{cargo_clea}**" if cargo_clea else "❌ Não pertence ao grupo CLEA"
+
+        embed = discord.Embed(title="📋 Informações do Militar", color=0x3498db)
+        embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={roblox_id}&width=420&height=420&format=png")
+        embed.add_field(name="👤 Membro Discord", value=f"{membro.mention} ({membro.name})", inline=False)
+        embed.add_field(name="🆔 ID do Discord", value=f"`{discord_id}`", inline=False)
+        embed.add_field(name="🎮 Nome de Usuário Roblox", value=roblox_info.get("name", "N/A"), inline=False)
+        embed.add_field(name="🕹️ ID do Roblox", value=f"`{roblox_id}`", inline=False)
+        embed.add_field(name="🌐 Perfil do Roblox", value=f"[Clique aqui](https://www.roblox.com/users/{roblox_id}/profile)", inline=False)
+        embed.add_field(name="🎖️ Cargo no Exército Brasileiro", value=cargo_eb_display, inline=False)
+        embed.add_field(name="🛡️ Cargo no CLEA", value=cargo_clea_display, inline=False)
+        embed.add_field(name="🗓️ Entrou no Roblox", value=joined_roblox, inline=True)
+        embed.add_field(name="📥 Entrou no Servidor", value=joined_discord, inline=True)
+        embed.set_footer(text=f"Solicitado por {ctx.author.display_name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+
+        await msg.edit(embed=embed)
+
+    except Exception:
+        print("❌ ERRO no comando info_militar:")
+        traceback.print_exc()
+        embed = discord.Embed(description="❌ Ocorreu um erro inesperado ao buscar informações do militar. Verifique o console.", color=0xff0000)
+        await msg.edit(embed=embed)
+
+@bot.command()
+async def manual_dev(ctx):
+    if not has_dev_permission(ctx.author):
+        embed = discord.Embed(description="❌ Você não tem permissão para ver este manual.", color=0xff0000)
+        return await ctx.send(embed=embed)
+
+    embed = discord.Embed(title="📘 Manual do Desenvolvedor", description="Comandos e ferramentas para administração e desenvolvimento.", color=0x8e44ad)
+    embed.add_field(name="`!vincular @usuário NomeDeUsuárioRoblox`", value="Associa a conta do Discord mencionada à conta Roblox informada.", inline=False)
+    embed.add_field(name="`!info_militar @usuário`", value="Exibe informações completas do militar (Discord, Roblox, grupos e datas de entrada).", inline=False)
+    embed.add_field(name="`!desempenho_ppf`", value="Exibe a contagem de autorizações PPF realizadas por membros do CLEA.", inline=False)
+    embed.add_field(name="🔐 Permissão", value="Somente membros com os cargos autorizados (`CARGOS_AUTORIZADOS_DEV`) podem usar estes comandos.", inline=False)
+    embed.set_footer(text="Sistema de Inteligência CLEA")
+    await ctx.send(embed=embed)
+
+@bot.command(name="desempenho_ppf")
+async def desempenho_ppf_command(ctx):
+    if not has_clea_role(ctx.author):
+        return await ctx.send(embed=discord.Embed(
+            description="❌ Você não tem permissão para usar este comando. Apenas membros do CLEA podem ver o desempenho de PPF.",
+            color=0xFF0000
+        ))
+
+    ppf_data = carregar_json(PPF_AUTORIZACOES_FILE)
+
+    if not ppf_data:
+        return await ctx.send(embed=discord.Embed(
+            description="⚠️ Nenhuma autorização de PPF registrada ainda.",
+            color=0xF1C40F
+        ))
+
+    embed = discord.Embed(
+        title="📋 DESEMPENHO DE AUTORIZAÇÕES PPF",
+        description="Veja abaixo quantas autorizações de PPF cada membro do CLEA realizou:",
+        color=0x2ECC71
+    )
+
+    membros = {str(m.id): m for m in ctx.guild.members}
+    sorted_ppf = sorted(ppf_data.items(), key=lambda item: item[1], reverse=True)
+
+    for user_id, qtd in sorted_ppf:
+        member = membros.get(user_id)
+        if member:
+            nome = member.display_name
+        else:
+            try:
+                user = await bot.fetch_user(int(user_id))
+                nome = user.display_name if user else f"Usuário Desconhecido ({user_id})"
+            except (discord.NotFound, ValueError):
+                nome = f"Usuário Desconhecido ({user_id})"
+                
+        embed.add_field(name=nome, value=f"**{qtd}** autorização(ões)", inline=False)
+
+    await ctx.send(embed=embed)
+    
+@bot.command(name="registrar_erro")
+async def registrar_erro_command(ctx, membro_errante: discord.Member, *, descricao_erro: str):
+    if not has_clea_role(ctx.author):
+        return await ctx.send("❌ Você não tem permissão para registrar erros. Apenas membros do CLEA podem fazer isso.")
+
+    dados = carregar_json(ERROS_FILE)
+    id_errante = str(membro_errante.id)
+
+    if id_errante not in dados:
+        dados[id_errante] = []
+
+    dados[id_errante].append({
+        "erro": descricao_erro,
+        "registrado_por": ctx.author.display_name, # Quem registrou o erro
+        "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    })
+
+    salvar_json(ERROS_FILE, dados)
+    await ctx.send(f"✅ Erro registrado para **{membro_errante.display_name}**: '{descricao_erro}'.")
+
+
+@bot.command(name="ver_erros")
+async def ver_erros_command(ctx):
+    if not has_clea_gestao_permission(ctx.author):
+        return await ctx.send("❌ Apenas Coordenação, Diretoria ou Supervisão pode visualizar os erros registrados.")
+
+    dados = carregar_json(ERROS_FILE)
+    if not dados:
+        return await ctx.send("📭 Nenhum erro gramatical registrado ainda.")
+
+    embed = discord.Embed(title="📚 Erros Gramaticais Registrados", color=discord.Color.dark_red())
+    total = 0
+    
+    membros_cache = {str(m.id): m for m in ctx.guild.members}
+
+    sorted_errantes = sorted(dados.items(), key=lambda item: len(item[1]), reverse=True)
+
+    for id_errante, erros in sorted_errantes:
+        membro = membros_cache.get(id_errante)
+        if not membro:
+            try:
+                membro = await bot.fetch_user(int(id_errante))
+            except (discord.NotFound, ValueError):
+                membro = None
+
+        nome_errante_display = membro.display_name if membro else f"Usuário Desconhecido ({id_errante})"
+        
+        lista_erros_formatada = []
+        for i, e in enumerate(erros):
+            erro_str = e.get('erro', 'Erro não especificado')
+            registrado_por_str = e.get('registrado_por', 'N/A')
+            data_hora_str = e.get('data_hora', 'N/A')
+            lista_erros_formatada.append(f"• **{erro_str}** (Registrado por: {registrado_por_str} em: {data_hora_str})")
+        
+        erros_field_value = "\n".join(lista_erros_formatada)
+        if len(erros_field_value) > 1024:
+            erros_field_value = erros_field_value[:1020] + "..."
+
+        embed.add_field(name=f"{nome_errante_display} ({len(erros)} erro(s))", value=erros_field_value, inline=False)
+        total += len(erros)
+
+    embed.set_footer(text=f"Total de erros gramaticais registrados: {total}")
+    await ctx.send(embed=embed)
+    
+@bot.command(name="manual_erros")
+async def manual_erros_command(ctx):
+    if not has_clea_gestao_permission(ctx.author):
+        return await ctx.send("❌ Apenas Coordenação, Diretoria ou Supervisão pode acessar o manual.")
+
+    embed = discord.Embed(
+        title="📘 Manual de Uso — Ferramentas de Avaliação Linguística e Disciplinar",
+        description="Este sistema permite que a Coordenação visualize **erros gramaticais** e **desempenho de PPFs** registrados por membros do CLEA.",
+        color=discord.Color.teal()
+    )
+
+    embed.add_field(
+        name="🔍 Comando de Registro — Erros Gramaticais",
+        value="**`!registrar_erro @membro_que_errou [descrição do erro]`**\nPermite a membros do CLEA registrar erros gramaticais observados, mencionando o autor do erro.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔎 Comando de Consulta — Erros Gramaticais",
+        value="**`!ver_erros`**\nMostra todos os erros registrados, agrupados por autor do erro.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📈 Comando de Consulta — Desempenho PPF",
+        value="**`!desempenho_ppf`**\nMostra quantas vezes cada membro do CLEA autorizou PPFs, ordenado por desempenho.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔒 Quem pode usar",
+        value="**`!registrar_erro`**: Apenas membros do **CLEA**.\n"
+              "**`!ver_erros` / `!desempenho_ppf` / `!manual_erros`**: Apenas cargos de **Coordenação, Diretoria e Supervisão**.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📋 Informações exibidas nos comandos",
+        value=(
+            "**`!ver_erros`**\n"
+            "• Nome do autor do erro\n"
+            "• Quantidade de erros por autor\n"
+            "• Lista de erros registrados (com data, hora e quem registrou)\n\n"
+            "**`!desempenho_ppf`**\n"
+            "• Nome do membro do CLEA\n"
+            "• Total de PPFs aceitos\n"
+            "• Ranking por desempenho"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛠️ Futuras funções disponíveis (sob demanda)",
+        value="• Exportar dados para CSV\n• Apagar registros específicos\n• Estatísticas detalhadas por período\n• Filtros por tipo de erro",
+        inline=False
+    )
+
+    embed.set_footer(text="Sistema de Monitoramento Linguístico e Disciplinar — CLEA")
+    await ctx.send(embed=embed)
+
+# IDs dos cargos autorizados
+CARGOS_GESTAO = [1326296455287148645, 1326293254898974720, 1371236740601348228]
+
+# Caminhos dos arquivos
+RELATORIOS_FILE = "relatorios_confirmados.json"
+PPF_FILE = "ppf_registros.json"
+
+def carregar_json(caminho):
+    if os.path.exists(caminho):
+        with open(caminho, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def salvar_json(caminho, dados):
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(dados, f, indent=2, ensure_ascii=False)
+
+# ===================== 1. CONFIRMAR RELATÓRIO =====================
+
+    # Salvar registro
+    dados = carregar_json(RELATORIOS_FILE)
+    registro_id = f"{militar.id}_{instrutor.id}_{dia.replace(' ', '_')}"
+    dados[registro_id] = {
+        "militar_id": str(militar.id),
+        "instrutor_id": str(instrutor.id),
+        "confirmador_id": str(ctx.author.id),
+        "dia": dia
+    }
+    salvar_json(RELATORIOS_FILE, dados)
+
+# ===================== 2. CONSULTAR RELATÓRIOS =====================
+@bot.command(name="consultar_relatorios")
+async def consultar_relatorios(ctx, membro: discord.Member):
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para consultar relatórios.")
+
+    dados = carregar_json(RELATORIOS_FILE)
+    total = sum(1 for r in dados.values() if r["militar_id"] == str(membro.id))
+    await ctx.send(f"🧾 {membro.mention} possui **{total} relatório(s)** confirmado(s).")
+
+# ===================== 3. REMOVER PPF =====================
+@bot.command(name="remover_ppf")
+async def remover_ppf(ctx, membro: discord.Member):
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para remover registros de PPF.")
+
+    dados = carregar_json(PPF_FILE)
+    if str(membro.id) in dados:
+        del dados[str(membro.id)]
+        salvar_json(PPF_FILE, dados)
+        await ctx.send(f"🔗 {membro.mention} foi removido do pódio de PPFs.")
+    else:
+        await ctx.send(f"⚠️ {membro.mention} não possui registros de PPFs.")
+
+# Funções auxiliares 
+def carregar_json(caminho):
+    if os.path.exists(caminho):
+        with open(caminho, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def salvar_json(caminho, dados):
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(dados, f, indent=2, ensure_ascii=False)
+
+@bot.command(name="manual_adm")
+async def manual_adm(ctx):
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Apenas Coordenação, Diretoria ou Supervisão pode acessar este manual.")
+
+    embed = discord.Embed(
+        title="📘 Manual Administrativo — Coordenação CLEA",
+        description="Lista de comandos restritos à gestão superior para controle de relatórios e desempenho.",
+        color=discord.Color.orange()
+    )
+
+    embed.add_field(
+        name="✅ `!confirmar_relatorio @militar @instrutor [dia]`",
+        value="Confirma oficialmente um relatório de instrução/auxílio. Envia para o canal de logs e registra no sistema para métricas.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🧾 `!consultar_relatorios @membro`",
+        value="Mostra quantos relatórios o membro possui confirmados. (Comando a ser implementado)", # Mantido, com nota
+        inline=False
+    )
+
+    embed.add_field(
+        name="🧹 `!resetar_ppf`",
+        value="Apaga completamente o pódio de PPFs. Use com extrema cautela. (Comando a ser implementado)", # Mantido, com nota
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔗 `!remover_ppf @membro`",
+        value="Remove um membro do sistema de contagem de PPFs (caso tenha saído, sido resetado ou removido por justa causa). (Comando a ser implementado)", # Mantido, com nota
+        inline=False
+    )
+
+    embed.add_field(
+        name="📈 `!desempenho_adm`", # Nome alterado
+        value="Exibe o ranking de administradores que mais confirmaram relatórios.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🏆 `!desempenho_eqp`", # Nome alterado
+        value="Mostra o desempenho geral da equipe, combinando relatórios confirmados e PPFs aceitos.",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📊 `!gerenciar_relatorios`", # Comando novo adicionado ao manual
+        value="Abre um painel interativo para visualizar e deletar relatórios confirmados de militares.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📚 `!ver_erros`",
+        value="Visualiza os erros gramaticais registrados por membros do CLEA.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📋 `!desempenho_ppf`", # Nome alterado para consistência
+        value="Exibe o ranking de aceitação de PPFs por membros do CLEA.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📖 `!manual_adm`",
+        value="Exibe este manual administrativo com todos os comandos disponíveis à gestão.",
+        inline=False
+    )
+
+    embed.set_footer(text="CLEA — Administração Superior | Uso restrito e monitorado")
+    await ctx.send(embed=embed)
+
+# ===================== COMANDO =====================
+@bot.command(name="remover_erro")
+async def remover_erro(ctx, membro: discord.Member):
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Apenas Coordenação, Diretoria ou Supervisão pode remover erros.")
+
+    dados = carregar_json("erros_gramaticais.json")
+    erros = dados.get(str(membro.id), [])
+
+    if not erros:
+        return await ctx.send(f"📭 {membro.mention} não possui erros registrados.")
+
+    view = ErroRemocaoView(ctx, membro, erros)
+    embed = gerar_embed_erros(membro, erros, 0, view.itens_por_pagina)
+    await ctx.send(embed=embed, view=view)
+
+# ===================== VIEW INTERATIVA =====================
+class ErroRemocaoView(View):
+    def __init__(self, ctx, membro, erros, pagina=0):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.membro = membro
+        self.erros = erros
+        self.pagina = pagina
+        self.itens_por_pagina = 5
+        self.max_paginas = math.ceil(len(erros) / self.itens_por_pagina)
+        self.atualizar_botoes()
+
+    def atualizar_botoes(self):
+        self.clear_items()
+        inicio = self.pagina * self.itens_por_pagina
+        fim = inicio + self.itens_por_pagina
+
+        for i, erro in enumerate(self.erros[inicio:fim], start=inicio):
+            botao = Button(label=f"Remover: {erro['erro'][:50]}", style=discord.ButtonStyle.red)
+            botao.callback = self.gerar_callback(i)
+            self.add_item(botao)
+
+        if self.max_paginas > 1:
+            if self.pagina > 0:
+                voltar = Button(label="⬅️ Anterior", style=discord.ButtonStyle.gray)
+                voltar.callback = self.voltar
+                self.add_item(voltar)
+
+            if self.pagina < self.max_paginas - 1:
+                proxima = Button(label="➡️ Próxima", style=discord.ButtonStyle.gray)
+                proxima.callback = self.proxima
+                self.add_item(proxima)
+
+    def gerar_callback(self, index):
+        async def callback(interaction):
+            if interaction.user != self.ctx.author:
+                return await interaction.response.send_message("❌ Apenas quem usou o comando pode interagir.", ephemeral=True)
+
+            erro_removido = self.erros.pop(index)
+            if self.erros:
+                salvar_json("erros_gramaticais.json", {str(self.membro.id): self.erros})
+            else:
+                dados = carregar_json("erros_gramaticais.json")
+                dados.pop(str(self.membro.id), None)
+                salvar_json("erros_gramaticais.json", dados)
+
+            await interaction.response.send_message(f"🧹 Erro removido: `{erro_removido['erro']}`", ephemeral=True)
+
+            if not self.erros:
+                await interaction.message.edit(content=f"✅ Todos os erros de {self.membro.mention} foram removidos.", embed=None, view=None)
+                return
+
+            self.pagina = 0
+            self.atualizar_botoes()
+            embed = gerar_embed_erros(self.membro, self.erros, self.pagina, self.itens_por_pagina)
+            await interaction.message.edit(embed=embed, view=self)
+
+        return callback
+
+    async def voltar(self, interaction):
+        self.pagina -= 1
+        self.atualizar_botoes()
+        embed = gerar_embed_erros(self.membro, self.erros, self.pagina, self.itens_por_pagina)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def proxima(self, interaction):
+        self.pagina += 1
+        self.atualizar_botoes()
+        embed = gerar_embed_erros(self.membro, self.erros, self.pagina, self.itens_por_pagina)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+# ===================== EMBED DE ERROS =====================
+def gerar_embed_erros(membro, erros, pagina, por_pagina):
+    inicio = pagina * por_pagina
+    fim = inicio + por_pagina
+    embed = discord.Embed(
+        title=f"✏️ Erros registrados por {membro.display_name}",
+        color=discord.Color.red()
+    )
+    for i, erro in enumerate(erros[inicio:fim], start=inicio + 1):
+        embed.add_field(name=f"Erro {i}", value=erro['erro'], inline=False)
+    embed.set_footer(text=f"Página {pagina + 1}")
+    return embed
+    
+@bot.command(name="marcar_presença")
+async def marcar_presenca(ctx, instrutor: discord.Member, data: str, hora: str, turma: discord.Role, aula: str, *nomes_recebidos):
+    canal_id = 1352083498999087124
+    canal = bot.get_channel(canal_id)
+
+    presentes = []
+    faltantes_justificados = []
+    faltantes_atrasados = []
+
+    # Processar lista digitada
+    nomes_informados_simples = []
+
+    for nome in nomes_recebidos:
+        if nome.endswith("-Justificada"):
+            nome_limpo = nome.replace("-Justificada", "").strip()
+            faltantes_justificados.append(nome_limpo)
+            nomes_informados_simples.append(nome_limpo)
+        elif nome.endswith("-Atrasado"):
+            nome_limpo = nome.replace("-Atrasado", "").strip()
+            faltantes_atrasados.append(nome_limpo)
+            nomes_informados_simples.append(nome_limpo)
+        else:
+            presentes.append(nome.strip())
+            nomes_informados_simples.append(nome.strip())
+
+    # Coletar membros da turma
+    membros_turma = [m for m in ctx.guild.members if turma in m.roles]
+    nomes_membros_turma = []
+
+    for m in membros_turma:
+        nomes_membros_turma.append(m.nick if m.nick else m.name)
+
+    # Gerar lista automática de faltantes
+    faltantes_automáticos = []
+    for nome_turma in nomes_membros_turma:
+        if not any(nome_turma.lower() in nome.lower() for nome in nomes_informados_simples):
+            faltantes_automáticos.append(nome_turma)
+
+    total_presentes = len(presentes)
+    total_faltantes = len(faltantes_justificados) + len(faltantes_atrasados) + len(faltantes_automáticos)
+
+    # Montar conteúdo do embed em formato fixo
+    conteudo = (
+        f"> ```Comparecimentos | {turma.name} | {aula}```\n"
+        "**> Presentes:\n"
+        "> - Lista de presença.\n"
+    )
+
+    for p in presentes:
+        conteudo += f"> \n> - {p}\n"
+
+    conteudo += f"> \n> - Número de presentes no total: {total_presentes} <:CLEA:1333973615091384361>**\n"
+
+    if total_faltantes > 0:
+        conteudo += f"\n**> Faltantes: {total_faltantes}\n"
+        for f in faltantes_justificados:
+            conteudo += f"> \n> - {f} (Justificada)\n"
+        for f in faltantes_atrasados:
+            conteudo += f"> \n> - {f} (Atrasado)\n"
+        for f in faltantes_automáticos:
+            conteudo += f"> \n> - {f}\n"
+        conteudo += "**\n"
+
+    conteudo += f"\n**Instrutor:** {instrutor.mention}"
+
+    await canal.send(content=conteudo)
+    await ctx.send("✅ Presença registrada com sucesso!", delete_after=5)
+    
+# --- IDs e Constantes  ---
+# Cargos de Gestão (Supervisão, Coordenação, Diretoria)
+CARGOS_GESTAO = [1326296455287148645, 1326293254898974720] 
+CANAL_LOGS_EXCLUSAO_RELATORIOS = 1394419957487632474
+
+# Arquivos de dados 
+RELATORIOS_FILE = "relatorios_confirmados.json"
+PPF_SOLICITANTES_ACEITOS_FILE = "ppf_solicitantes_aceitos.json" # Para o !desempenho_eqp
+
+# --- Funções Auxiliares ---
+def carregar_json(filepath):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def salvar_json(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# Garante que os arquivos JSON existam ao iniciar o bot =
+for file_path in [RELATORIOS_FILE, PPF_SOLICITANTES_ACEITOS_FILE]:
+    if not os.path.exists(file_path):
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
+# --- Views Interativas para os Comandos ---
+
+class DesempenhoAdmView(View):
+    def __init__(self, data, current_page=0, items_per_page=5, members_cache={}):
+        super().__init__(timeout=60)
+        self.data = data # {id_confirmador: contagem}
+        self.current_page = current_page
+        self.items_per_page = items_per_page
+        self.members_cache = members_cache
+        self.total_pages = math.ceil(len(self.data) / self.items_per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        if self.total_pages > 1:
+            self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_adm", disabled=(self.current_page == 0)))
+            self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+            self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_adm", disabled=(self.current_page == self.total_pages - 1)))
+
+    async def get_member_name(self, user_id):
+        if user_id in self.members_cache:
+            return self.members_cache[user_id].display_name
+        
+        try:
+            member = await bot.fetch_user(int(user_id))
+            self.members_cache[user_id] = member
+            return member.display_name
+        except (discord.NotFound, ValueError):
+            return f"Usuário Desconhecido ({user_id})"
+
+    async def generate_embed(self):
+        embed = discord.Embed(
+            title="📈 Desempenho de Autorização de Relatórios (Administradores)",
+            color=0x2ECC71
+        )
+        
+        start_index = self.current_page * self.items_per_page
+        end_index = start_index + self.items_per_page
+        
+        sorted_data = sorted(self.data.items(), key=lambda item: item[1], reverse=True)
+        
+        description_lines = []
+        for i, (user_id, count) in enumerate(sorted_data[start_index:end_index]):
+            name = await self.get_member_name(user_id)
+            description_lines.append(f"**{i + start_index + 1}.** {name}: **{count}** relatório(s) autorizado(s)")
+        
+        if not description_lines:
+            embed.description = "Nenhum dado encontrado para esta página."
+        else:
+            embed.description = "\n".join(description_lines)
+            
+        embed.set_footer(text="Baseado em relatórios confirmados.")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Verifica se o usuário tem algum dos cargos de gestão
+        return any(role.id in CARGOS_GESTAO for role in interaction.user.roles)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    @discord.ui.button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_adm")
+    async def prev_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_adm")
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+class DesempenhoEqpView(View):
+    def __init__(self, data, current_page=0, items_per_page=5, members_cache={}):
+        super().__init__(timeout=60)
+        self.data = data # {id_militar: {"relatorios": X, "ppfs": Y}}
+        self.current_page = current_page
+        self.items_per_page = items_per_page
+        self.members_cache = members_cache
+        
+        # Ordena os militares pelo total (relatórios + PPFs)
+        self.sorted_military_ids = sorted(self.data.keys(), key=lambda k: (self.data[k]['relatorios'] + self.data[k]['ppfs']), reverse=True)
+        self.total_pages = math.ceil(len(self.sorted_military_ids) / self.items_per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        if self.total_pages > 1:
+            self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_eqp", disabled=(self.current_page == 0)))
+            self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+            self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_eqp", disabled=(self.current_page == self.total_pages - 1)))
+
+    async def get_member_name(self, user_id):
+        if user_id in self.members_cache:
+            return self.members_cache[user_id].display_name
+        
+        try:
+            member = await bot.fetch_user(int(user_id))
+            self.members_cache[user_id] = member
+            return member.display_name
+        except (discord.NotFound, ValueError):
+            return f"Usuário Desconhecido ({user_id})"
+
+    async def generate_embed(self):
+        embed = discord.Embed(
+            title="🏆 Desempenho da Equipe (Relatórios Autorizados & PPFs Aceitos)",
+            color=0x3498DB
+        )
+        
+        start_index = self.current_page * self.items_per_page
+        end_index = start_index + self.items_per_page
+        
+        sorted_data = sorted(self.data.items(), key=lambda item: item[1], reverse=True)
+        
+        description_lines = []
+        for i, (user_id, count) in enumerate(sorted_data[start_index:end_index]):
+            name = await self.get_member_name(user_id)
+            description_lines.append(f"**{i + start_index + 1}.** {name}: **{count}** relatório(s) autorizado(s)")
+        
+        if not description_lines:
+            embed.description = "Nenhum dado encontrado para esta página."
+        else:
+            embed.description = "\n".join(description_lines)
+            
+        embed.set_footer(text="Baseado em relatórios confirmados.")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Verifica se o usuário tem algum dos cargos de gestão
+        return any(role.id in CARGOS_GESTAO for role in interaction.user.roles)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    @discord.ui.button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_adm")
+    async def prev_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_adm")
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+class DesempenhoEqpView(View):
+    def __init__(self, data, current_page=0, items_per_page=5, members_cache={}):
+        super().__init__(timeout=60)
+        self.data = data # {id_militar: {"relatorios": X, "ppfs": Y}}
+        self.current_page = current_page
+        self.items_per_page = items_per_page
+        self.members_cache = members_cache
+        
+        # Ordena os militares pelo total (relatórios + PPFs)
+        self.sorted_military_ids = sorted(self.data.keys(), key=lambda k: (self.data[k]['relatorios'] + self.data[k]['ppfs']), reverse=True)
+        self.total_pages = math.ceil(len(self.sorted_military_ids) / self.items_per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        if self.total_pages > 1:
+            self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_eqp", disabled=(self.current_page == 0)))
+            self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+            self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_eqp", disabled=(self.current_page == self.total_pages - 1)))
+
+    async def get_member_name(self, user_id):
+        if user_id in self.members_cache:
+            return self.members_cache[user_id].display_name
+        
+        try:
+            member = await bot.fetch_user(int(user_id))
+            self.members_cache[user_id] = member
+            return member.display_name
+        except (discord.NotFound, ValueError):
+            return f"Usuário Desconhecido ({user_id})"
+
+    async def generate_embed(self):
+        embed = discord.Embed(
+            title="🏆 Desempenho da Equipe (Relatórios Autorizados & PPFs Aceitos)",
+            color=0x3498DB
+        )
+        
+        start_index = self.current_page * self.items_per_page
+        end_index = start_index + self.items_per_page
+        
+        description_lines = []
+        for i, militar_id in enumerate(self.sorted_military_ids[start_index:end_index]):
+            name = await self.get_member_name(militar_id)
+            relatorios = self.data[militar_id].get("relatorios", 0)
+            ppfs = self.data[militar_id].get("ppfs", 0)
+            total = relatorios + ppfs
+            description_lines.append(f"**{i + start_index + 1}.** {name}: **{relatorios}** relatório(s), **{ppfs}** PPF(s) aceito(s) (Total: {total})")
+        
+        if not description_lines:
+            embed.description = "Nenhum dado encontrado para esta página."
+        else:
+            embed.description = "\n".join(description_lines)
+            
+        embed.set_footer(text="Baseado em relatórios confirmados e PPFs aceitos.")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return any(role.id in CARGOS_GESTAO for role in interaction.user.roles)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    @discord.ui.button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_eqp")
+    async def prev_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_eqp")
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+class GerenciarRelatoriosView(View):
+    def __init__(self, ctx, all_relatorios_data, current_page=0, items_per_page=5, selected_militar_id=None, selected_relatorio_id=None):
+        super().__init__(timeout=180) # Timeout maior para navegação
+        self.ctx = ctx
+        self.all_relatorios_data = all_relatorios_data
+        self.current_page = current_page
+        self.items_per_page = items_per_page
+        self.selected_militar_id = selected_militar_id
+        self.selected_relatorio_id = selected_relatorio_id
+        self.members_cache = {str(m.id): m for m in ctx.guild.members} # Cache de membros do servidor
+        self.state = "initial" # initial, militar_options, view_relatorios, confirm_delete
+
+        self.update_view()
+
+    async def get_member_name(self, user_id):
+        if user_id in self.members_cache:
+            return self.members_cache[user_id].display_name
+        try:
+            member = await bot.fetch_user(int(user_id))
+            self.members_cache[user_id] = member
+            return member.display_name
+        except (discord.NotFound, ValueError):
+            return f"Usuário Desconhecido ({user_id})"
+
+    def group_relatorios_by_militar(self):
+        militares_relatorios = {}
+        for rel_id, rel_info in self.all_relatorios_data.items():
+            militar_id = rel_info.get("militar_id")
+            if militar_id:
+                if militar_id not in militares_relatorios:
+                    militares_relatorios[militar_id] = []
+                militares_relatorios[militar_id].append(rel_id)
+        
+@bot.command(name="gerenciar_relatorios")
+async def gerenciar_relatorios_command(ctx):
+    """
+    Permite aos membros da gestão visualizar e apagar relatórios confirmados
+    através de uma interface interativa.
+    """
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para gerenciar relatórios.", ephemeral=True)
+
+    relatorios_data = carregar_json(RELATORIOS_FILE)
+    
+    view = GerenciarRelatoriosView(ctx, relatorios_data)
+    embed = await view.generate_embed()
+    view.message = await ctx.send(embed=embed, view=view)
+    
+        # Ordena os militares pela quantidade de relatórios
+def get_militares_ordenados_por_relatorios(militares_relatorios):
+    return sorted(
+        [(mid, len(rels)) for mid, rels in militares_relatorios.items()],
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+def get_relatorios_of_militar(self):
+    if not self.selected_militar_id:
+        return []
+        
+        relatorios_do_militar = []
+        for rel_id, rel_info in self.all_relatorios_data.items():
+            if rel_info.get("militar_id") == self.selected_militar_id:
+                relatorios_do_militar.append((rel_id, rel_info))
+        
+        # Ordena os relatórios por data, do mais recente para o mais antigo
+        try:
+            relatorios_do_militar.sort(key=lambda x: datetime.strptime(x[1].get("dia", "01/01/2000"), "%d/%m/%Y"), reverse=True)
+        except ValueError:
+            pass # Ignora se a data estiver em formato incorreto
+
+        return relatorios_do_militar
+
+def update_view(self):
+        self.clear_items() # Limpa os botões existentes
+        
+        if self.state == "initial":
+            militars_data = self.group_relatorios_by_militar()
+            self.total_pages = math.ceil(len(militars_data) / self.items_per_page)
+            
+            start_index = self.current_page * self.items_per_page
+            end_index = start_index + self.items_per_page
+            
+            for militar_id, count in militars_data[start_index:end_index]:
+                # Adiciona um botão para cada militar na página atual
+                self.add_item(Button(label=f"👤 {self.members_cache.get(militar_id, {'display_name': 'Carregando...'}).display_name} ({count})",
+                                     style=discord.ButtonStyle.primary, custom_id=f"select_militar_{militar_id}"))
+
+            # Botões de navegação da lista de militares
+            if self.total_pages > 1:
+                self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_militar_list", disabled=(self.current_page == 0)))
+                self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+                self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_militar_list", disabled=(self.current_page == self.total_pages - 1)))
+        
+        elif self.state == "militar_options":
+            # Opções para o militar selecionado
+            self.add_item(Button(label="📄 Ver Relatórios", style=discord.ButtonStyle.success, custom_id="view_relatorios"))
+            self.add_item(Button(label="🗑️ Deletar Relatório", style=discord.ButtonStyle.danger, custom_id="delete_relatorio_option"))
+            self.add_item(Button(label="↩️ Voltar à Lista", style=discord.ButtonStyle.secondary, custom_id="back_to_militar_list"))
+
+        elif self.state == "view_relatorios":
+            relatorios = self.get_relatorios_of_militar()
+            self.total_pages = math.ceil(len(relatorios) / self.items_per_page)
+
+            start_index = self.current_page * self.items_per_page
+            end_index = start_index + self.items_per_page
+
+            for i, (rel_id, rel_info) in enumerate(relatorios[start_index:end_index]):
+                dia = rel_info.get("dia", "N/A")
+                label = f"ID: {rel_id.split('_')[0][:5]}... - {dia}" # Simplifica o label
+                self.add_item(Button(label=label, style=discord.ButtonStyle.blurple, custom_id=f"view_details_{rel_id}")) # Este botão é apenas para ver detalhes, não faz nada por agora
+
+            # Botões de navegação da lista de relatórios
+            if self.total_pages > 1:
+                self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_rel_list", disabled=(self.current_page == 0)))
+                self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+                self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_rel_list", disabled=(self.current_page == self.total_pages - 1)))
+            
+            self.add_item(Button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, custom_id="back_to_militar_options"))
+
+        elif self.state == "confirm_delete":
+            relatorios = self.get_relatorios_of_militar()
+            self.total_pages = math.ceil(len(relatorios) / self.items_per_page)
+
+            start_index = self.current_page * self.items_per_page
+            end_index = start_index + self.items_per_page
+
+            for i, (rel_id, rel_info) in enumerate(relatorios[start_index:end_index]):
+                dia = rel_info.get("dia", "N/A")
+                label = f"🗑️ Relatório {dia} (ID: {rel_id.split('_')[0][:5]}...)"
+                self.add_item(Button(label=label, style=discord.ButtonStyle.danger, custom_id=f"delete_specific_rel_{rel_id}"))
+
+            # Botões de navegação para deleção
+            if self.total_pages > 1:
+                self.add_item(Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, custom_id="prev_del_list", disabled=(self.current_page == 0)))
+                self.add_item(Button(label=f"Página {self.current_page + 1}/{self.total_pages}", style=discord.ButtonStyle.gray, disabled=True))
+                self.add_item(Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary, custom_id="next_del_list", disabled=(self.current_page == self.total_pages - 1)))
+            
+            self.add_item(Button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, custom_id="back_to_militar_options"))
+
+async def generate_embed(self):
+        embed = discord.Embed(color=0x8e44ad)
+        
+        if self.state == "initial":
+            embed.title = "📊 Gerenciar Relatórios - Selecione um Militar"
+            embed.description = "Clique no militar para ver as opções ou gerenciar seus relatórios."
+            militares_data = self.group_relatorios_by_militar()
+            if not militares_data:
+                embed.description = "Nenhum relatório confirmado ainda."
+            else:
+                description_lines = []
+                start_index = self.current_page * self.items_per_page
+                end_index = start_index + self.items_per_page
+                for militar_id, count in militares_data[start_index:end_index]:
+                    name = await self.get_member_name(militar_id)
+                    description_lines.append(f"**{name}** ({count} relatório(s))")
+                embed.description = "\n".join(description_lines)
+            
+        elif self.state == "militar_options":
+            militar_name = await self.get_member_name(self.selected_militar_id)
+            embed.title = f"👤 {militar_name} - Opções de Relatórios"
+            embed.description = "O que você deseja fazer com os relatórios deste militar?"
+        
+        elif self.state == "view_relatorios":
+            militar_name = await self.get_member_name(self.selected_militar_id)
+            embed.title = f"📄 Relatórios de {militar_name}"
+            relatorios = self.get_relatorios_of_militar()
+
+            if not relatorios:
+                embed.description = "Este militar não possui relatórios registrados."
+            else:
+                description_lines = []
+                start_index = self.current_page * self.items_per_page
+                end_index = start_index + self.items_per_page
+                for i, (rel_id, rel_info) in enumerate(relatorios[start_index:end_index]):
+                    instrutor_name = await self.get_member_name(rel_info.get("instrutor_id", "N/A"))
+                    confirmador_name = await self.get_member_name(rel_info.get("confirmador_id", "N/A"))
+                    dia = rel_info.get("dia", "N/A")
+                    
+                    description_lines.append(
+                        f"**ID:** `{rel_id.split('_')[0]}`\n"
+                        f"**Instrutor:** {instrutor_name}\n"
+                        f"**Confirmado por:** {confirmador_name}\n"
+                        f"**Dia:** {dia}\n"
+                        "--------------------"
+                    )
+                embed.description = "\n".join(description_lines)
+
+        elif self.state == "confirm_delete":
+            militar_name = await self.get_member_name(self.selected_militar_id)
+            embed.title = f"🗑️ Deletar Relatório de {militar_name}"
+            embed.description = "Selecione o relatório que você deseja apagar."
+            relatorios = self.get_relatorios_of_militar()
+            if not relatorios:
+                embed.description = "Este militar não possui relatórios para deletar."
+            else:
+                description_lines = []
+                start_index = self.current_page * self.items_per_page
+                end_index = start_index + self.items_per_page
+                for i, (rel_id, rel_info) in enumerate(relatorios[start_index:end_index]):
+                    dia = rel_info.get("dia", "N/A")
+                    description_lines.append(f"• Relatório do dia: **{dia}** (ID: `{rel_id.split('_')[0]}`)")
+                embed.description = "\n".join(description_lines)
+
+        embed.set_footer(text=f"Gerenciado por {self.ctx.author.display_name}")
+        return embed
+
+async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Garante que apenas usuários com os cargos de gestão e no contexto da mensagem original podem interagir
+        return any(role.id in CARGOS_GESTAO for role in interaction.user.roles) and interaction.message.id == self.message.id
+
+async def on_timeout(self):
+        # Desabilita os botões quando a view expira
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+async def handle_button_click(self, interaction: discord.Interaction, custom_id: str):
+        if custom_id.startswith("select_militar_"):
+            self.selected_militar_id = custom_id.replace("select_militar_", "")
+            self.state = "militar_options"
+            self.current_page = 0 # Reinicia a página ao mudar de estado
+            self.update_view()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        
+        elif custom_id == "view_relatorios":
+            self.state = "view_relatorios"
+            self.current_page = 0
+            self.update_view()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        elif custom_id == "delete_relatorio_option":
+            self.state = "confirm_delete"
+            self.current_page = 0
+            self.update_view()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        elif custom_id.startswith("delete_specific_rel_"):
+            self.selected_relatorio_id = custom_id.replace("delete_specific_rel_", "")
+            # Abre o modal para o motivo da exclusão
+            await interaction.response.send_modal(DeleteReasonModal(self.ctx, self))
+
+        elif custom_id == "back_to_militar_list":
+            self.selected_militar_id = None
+            self.selected_relatorio_id = None
+            self.state = "initial"
+            self.current_page = 0
+            self.update_view()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        
+        elif custom_id == "back_to_militar_options":
+            self.selected_relatorio_id = None
+            self.state = "militar_options"
+            self.current_page = 0
+            self.update_view()
+            embed = await self.generate_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        # Paginação para lista de militares
+        elif custom_id == "prev_militar_list":
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        elif custom_id == "next_militar_list":
+            militars_data = self.group_relatorios_by_militar()
+            self.total_pages = math.ceil(len(militars_data) / self.items_per_page)
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        elif custom_id == "prev_rel_list":
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        elif custom_id == "next_rel_list":
+            relatorios = self.get_relatorios_of_militar()
+            # self.total_pages = math.ceil(len(relatorios) / self.items_per_page) 
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        # Paginação para lista de deleção de relatórios
+        elif custom_id == "prev_del_list":
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        elif custom_id == "next_del_list":
+            relatorios = self.get_relatorios_of_militar()
+            # self.total_pages = math.ceil(len(relatorios) / self.items_per_page) 
+            if self.current_page < self.total_pages - 1:
+                self.current_page += 1
+                self.update_view()
+                embed = await self.generate_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.defer()
+
+        else:
+            await interaction.response.defer() # Para interações não tratadas, evita erro
+
+class GerenciarRelatoriosView(discord.ui.View):
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+        print(f"Erro em GerenciarRelatoriosView: {error}")
+        import traceback
+        traceback.print_exc()
+        await interaction.response.send_message("Ocorreu um erro inesperado.", ephemeral=True)
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        # Sobrescreve para garantir que todas as interações de botão sejam tratadas pela nossa lógica
+        if interaction.data and "custom_id" in interaction.data:
+            await self.handle_button_click(interaction, interaction.data["custom_id"])
+        else:
+            await super().on_interaction(interaction) # Chama o método pai para tratar outros tipos de interação
+
+class DeleteReasonModal(Modal, title="Motivo da Exclusão do Relatório"):
+    reason = TextInput(
+        label="Por que você está apagando este relatório?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Ex: 'Dados incorretos', 'Relatório duplicado', 'Erro de registro'",
+        required=True,
+        max_length=500
+    )
+
+    def __init__(self, ctx, parent_view):
+        super().__init__()
+        self.ctx = ctx
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True) # Defer a resposta para ter tempo de processar
+        relatorios_data = carregar_json(RELATORIOS_FILE)
+        rel_id_to_delete = self.parent_view.selected_relatorio_id
+
+        if rel_id_to_delete in relatorios_data:
+            deleted_rel_info = relatorios_data.pop(rel_id_to_delete)
+            salvar_json(RELATORIOS_FILE, relatorios_data)
+
+            log_channel = self.ctx.guild.get_channel(CANAL_LOGS_EXCLUSAO_RELATORIOS)
+            if log_channel:
+                militar_name = await self.parent_view.get_member_name(deleted_rel_info.get("militar_id", "N/A"))
+                instrutor_name = await self.parent_view.get_member_name(deleted_rel_info.get("instrutor_id", "N/A"))
+
+                embed_log = discord.Embed(
+                    title="🗑️ Relatório Apagado!",
+                    description="Um relatório foi excluído do sistema.",
+                    color=discord.Color.red()
+                )
+                embed_log.add_field(name="👤 Militar", value=militar_name, inline=True)
+                embed_log.add_field(name="🧑‍🏫 Instrutor (No Relatório)", value=instrutor_name, inline=True)
+                embed_log.add_field(name="📅 Dia do Relatório", value=deleted_rel_info.get("dia", "N/A"), inline=True)
+                embed_log.add_field(name="👮 Apagado por", value=f"{interaction.user.mention} (`{interaction.user.display_name}`)", inline=True)
+                embed_log.add_field(name="💬 Motivo", value=self.reason.value, inline=False)
+                embed_log.set_footer(text=f"ID do Relatório: {rel_id_to_delete} | {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+                await log_channel.send(embed=embed_log)
+
+            await interaction.followup.send(f"✅ Relatório apagado com sucesso e log enviado para o canal de registros.", ephemeral=True)
+            
+            # Atualiza a view principal após a exclusão para refletir a mudança
+            self.parent_view.all_relatorios_data = carregar_json(RELATORIOS_FILE)
+            self.parent_view.selected_relatorio_id = None
+            self.parent_view.state = "militar_options" # Volta para as opções do militar ou initial se ele não tiver mais relatórios
+            self.parent_view.current_page = 0
+            self.parent_view.update_view()
+            
+            embed_updated = await self.parent_view.generate_embed()
+            await self.parent_view.message.edit(embed=embed_updated, view=self.parent_view)
+
+        else:
+            await interaction.followup.send("❌ Relatório não encontrado para exclusão.", ephemeral=True)
+
+
+# --- Comandos do Bot ---
+
+@bot.command(name="confirmar_relatorio")
+async def confirmar_relatorio(ctx, militar: discord.Member, instrutor: discord.Member, *, dia: str):
+    """
+    Confirma um relatório de desempenho para um militar, registrando-o e enviando para o canal de logs.
+    Este comando só pode ser usado por membros com cargos de gestão.
+    """
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para confirmar relatórios.")
+
+    canal_logs = bot.get_channel(1394419957487632474)
+    if canal_logs is None:
+        return await ctx.send("❌ Canal de logs não encontrado. Por favor, configure `CANAL_LOGS_EXCLUSAO_RELATORIOS` corretamente.")
+
+    embed = discord.Embed(
+        title="📄 Relatório Confirmado",
+        description=(
+            f"O relatório de **{militar.mention}** referente à instrução ou auxílio prestado por **{instrutor.mention}** "
+            f"no dia **{dia}** foi autorizado por {ctx.author.mention}."
+        ),
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="Confirmação de Relatório — CLEA")
+    await canal_logs.send(embed=embed) # Envia para o canal de logs de confirmação
+    await ctx.send("✅ Relatório confirmado e enviado para o canal de registros.")
+
+    # Salva o relatório no arquivo JSON
+    dados = carregar_json(RELATORIOS_FILE)
+    
+    # Gerar um ID único para o relatório
+    timestamp_hash = str(hash(datetime.now()))[:8]
+    registro_id = f"{militar.id}_{instrutor.id}_{dia.replace('/', '-')}_{timestamp_hash}"
+
+    dados[registro_id] = {
+        "militar_id": str(militar.id),
+        "instrutor_id": str(instrutor.id),
+        "confirmador_id": str(ctx.author.id), # Quem confirmou o relatório
+        "dia": dia
+    }
+    salvar_json(RELATORIOS_FILE, dados)
+
+@bot.command(name="desempenho_adm")
+async def desempenho_adm_command(ctx):
+    """
+    Exibe o desempenho dos administradores na autorização de relatórios,
+    ordenado pela quantidade de relatórios confirmados por cada um.
+    Apenas membros com cargos de gestão podem usar este comando.
+    """
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para usar este comando. Apenas Supervisão, Coordenação e Diretoria podem ver este desempenho.", ephemeral=True)
+
+    relatorios_data = carregar_json(RELATORIOS_FILE)
+    
+    confirmacoes_por_adm = {}
+    for relatorio_id, relatorio_info in relatorios_data.items():
+        confirmador_id = relatorio_info.get("confirmador_id")
+        if confirmador_id:
+            confirmacoes_por_adm[confirmador_id] = confirmacoes_por_adm.get(confirmador_id, 0) + 1
+
+    if not confirmacoes_por_adm:
+        return await ctx.send(embed=discord.Embed(
+            description="⚠️ Nenhum relatório confirmado por administradores ainda.",
+            color=0xF1C40F
+        ))
+    
+    # Criar um cache de membros do servidor para evitar chamadas repetidas à API do Discord
+    members_cache = {str(m.id): m for m in ctx.guild.members}
+    view = DesempenhoAdmView(confirmacoes_por_adm, members_cache=members_cache)
+    embed = await view.generate_embed()
+    view.message = await ctx.send(embed=embed, view=view)
+
+@bot.command(name="desempenho_eqp")
+async def desempenho_eqp_command(ctx):
+    """
+    Exibe o desempenho da equipe (militares) com base nos relatórios que tiveram
+    confirmados e nas autorizações de PPF que receberam.
+    Apenas membros com cargos de gestão podem usar este comando.
+    """
+    if not any(role.id in CARGOS_GESTAO for role in ctx.author.roles):
+        return await ctx.send("❌ Você não tem permissão para usar este comando. Apenas Supervisão, Coordenação e Diretoria podem ver este desempenho.", ephemeral=True)
+
+    relatorios_data = carregar_json(RELATORIOS_FILE)
+    ppf_solicitantes_data = carregar_json(PPF_SOLICITANTES_ACEITOS_FILE)
+
+    desempenho_militares = {}
+
+    # Contabilizar relatórios confirmados
+    for relatorio_id, relatorio_info in relatorios_data.items():
+        militar_id = relatorio_info.get("militar_id")
+        if militar_id:
+            if militar_id not in desempenho_militares:
+                desempenho_militares[militar_id] = {"relatorios": 0, "ppfs": 0}
+            desempenho_militares[militar_id]["relatorios"] += 1
+
+    # Contabilizar PPFs aceitos (apenas para quem solicitou e teve aceito)
+    for solicitante_id, count in ppf_solicitantes_data.items():
+        if solicitante_id not in desempenho_militares:
+            desempenho_militares[solicitante_id] = {"relatorios": 0, "ppfs": 0}
+        desempenho_militares[solicitante_id]["ppfs"] = count
+
+    if not desempenho_militares:
+        return await ctx.send(embed=discord.Embed(
+            description="⚠️ Nenhum dado de desempenho (relatórios ou PPFs) encontrado para a equipe ainda.",
+            color=0xF1C40F
+        ))
+    
+    members_cache = {str(m.id): m for m in ctx.guild.members}
+    view = DesempenhoEqpView(desempenho_militares, members_cache=members_cache)
+    embed = await view.generate_embed()
+    view.message = await ctx.send(embed=embed, view=view)
+
+# Tabela de turmas
+TURMAS = {
+    "1": {
+        "cargo": "<@&ID_DO_CARGO_TURMA_01>",
+        "canal": 1326316405812891658,
+        "chave_json": "turma_1"
+    },
+    "2": {
+        "cargo": "<@&ID_DO_CARGO_TURMA_02>",
+        "canal": 1326325811837534339,
+        "chave_json": "turma_2"
+    }
+}
+
+CANAL_ENCERRAMENTO = 1326267990496383050
+HORARIOS_AULAS = {}
+
+# Função para carregar os dados das aulas agendadas
+def carregar_aulas():
+    with open("aulas_agendadas.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# Mensagem de inicialização do bot
+@bot.event
+async def on_ready():
+    print(f"✅ Bot conectado como {bot.user}")
+    for turma, config in TURMAS.items():
+        canal_id = config.get('canal', 'N/A')
+        mencao_id = config.get('cargo', 'N/A')
+        print(f"Turma {turma} - Canal: {canal_id} | Cargo: {mencao_id}")
+
+# Comando para iniciar a aula
+@bot.command(name="iniciar_aula")
+async def iniciar_aula(ctx, numero_turma: str):
+    if numero_turma not in TURMAS:
+        return await ctx.send("❌ Número de turma inválido. Use `1` ou `2`.")
+
+    turma = TURMAS[numero_turma]
+    aulas = carregar_aulas()
+    chave = turma["chave_json"]
+    ultima_aula = aulas.get(chave, [])[-1] if aulas.get(chave) else None
+
+    if not ultima_aula:
+        return await ctx.send("⚠️ Nenhuma aula agendada para essa turma.")
+
+    canal = bot.get_channel(turma["canal"])
+    HORARIOS_AULAS[numero_turma] = datetime.utcnow()
+
+    embed = discord.Embed(
+        title="📚 Aula Iniciada!",
+        description=f"{turma['cargo']} A aula foi iniciada com sucesso!",
+        color=0x2ECC71
+    )
+    embed.add_field(name="📌 Título", value=ultima_aula["titulo"], inline=False)
+    embed.add_field(name="📅 Data", value=ultima_aula["data"], inline=True)
+    embed.add_field(name="🕒 Horário", value=ultima_aula["hora"], inline=True)
+    embed.add_field(name="🧑‍🏫 Instrutor", value=ultima_aula["instrutor"], inline=False)
+    embed.add_field(name="🛡️ Equipe Auxiliar", value=", ".join(ultima_aula["equipe"]), inline=False)
+    embed.set_footer(text="Bom desempenho a todos os participantes!")
+
+    await canal.send(content=turma["cargo"], embed=embed)
+
+# Comando para finalizar a aula
+@bot.command(name="finalizar_aula")
+async def finalizar_aula(ctx):
+    turma_usuario = None
+    for numero, turma in TURMAS.items():
+        if ctx.channel.id == turma["canal"]:
+            turma_usuario = numero
+            break
+
+    if not turma_usuario:
+        return await ctx.send("❌ Esse comando só pode ser usado no canal da turma.")
+
+    inicio = HORARIOS_AULAS.get(turma_usuario)
+    if not inicio:
+        return await ctx.send("⚠️ Nenhuma aula em andamento registrada para essa turma.")
+
+    fim = datetime.utcnow()
+    duracao = fim - inicio
+    minutos = int(duracao.total_seconds() // 60)
+
+    aulas = carregar_aulas()
+    ultima_aula = aulas.get(TURMAS[turma_usuario]["chave_json"], [])[-1]
+
+    canal_final = bot.get_channel(CANAL_ENCERRAMENTO)
+    embed = discord.Embed(
+        title="✅ Aula Finalizada",
+        description=f"A aula da {TURMAS[turma_usuario]['cargo']} foi finalizada.",
+        color=0x3498DB
+    )
+    embed.add_field(name="📚 Título", value=ultima_aula["titulo"], inline=False)
+    embed.add_field(name="⏳ Duração", value=f"{minutos} minutos", inline=False)
+    embed.add_field(name="🧑‍🏫 Instrutor", value=ultima_aula["instrutor"], inline=False)
+    embed.add_field(name="🛡️ Equipe Auxiliar", value=", ".join(ultima_aula["equipe"]), inline=False)
+    embed.set_footer(text="Relato automático de encerramento.")
+
+    await canal_final.send(content=f"{ultima_aula['instrutor']} {' '.join(ultima_aula['equipe'])}", embed=embed)
+
+    # Limpa horário da aula
+    del HORARIOS_AULAS[turma_usuario]
+
+DONO_ID = 1123727052705636424
+CANAL_HORARIOS_ID = 1359190202588991570
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+def hora_para_minutos(hora_str):
+    try:
+        h, m = map(int, hora_str.split(":"))
+        return h * 60 + m
+    except:
+        return None
+
+def dentro_do_intervalo(hora_atual, inicio, fim):
+    if inicio is None or fim is None:
+        return False
+    if fim < inicio:  # intervalo que atravessa a meia-noite
+        return hora_atual >= inicio or hora_atual <= fim
+    return inicio <= hora_atual <= fim
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.author.id == DONO_ID:
+        conteudo = message.content.lower()
+
+        if "quais membros estão disponíveis" in conteudo:
+            try:
+                # === Determinar hora ===
+                hora_atual = None
+                hora_exibicao = None
+                if "são" in conteudo:
+                    try:
+                        partes = message.content.lower().split("são")
+                        hora_str = partes[1].split(",")[0].strip()
+                        hora_atual = hora_para_minutos(hora_str)
+                        hora_exibicao = hora_str
+                    except:
+                        hora_atual = None
+
+                if hora_atual is None:  # usa hora atual se não especificar
+                    agora = datetime.utcnow()
+                    hora_atual = agora.hour * 60 + agora.minute
+                    hora_exibicao = agora.strftime("%H:%M")
+
+                # === Buscar relatórios no canal ===
+                canal = bot.get_channel(CANAL_HORARIOS_ID)
+                mensagens = [msg async for msg in canal.history(limit=50)]
+
+                disponiveis = []
+
+                hoje = datetime.utcnow().strftime("%A").lower()
+                dias_semana = {
+                    "monday": "segunda-feira",
+                    "tuesday": "terça-feira",
+                    "wednesday": "quarta-feira",
+                    "thursday": "quinta-feira",
+                    "friday": "sexta-feira",
+                    "saturday": "sábado",
+                    "sunday": "domingo",
+                }
+                dia_em_portugues = dias_semana[hoje]
+
+                for msg in mensagens:
+                    texto = msg.content
+
+                    if texto.startswith("**Relatório de disponibilidade!**"):
+                        linhas = texto.split("\n")
+
+                        nome_linha = linhas[1].replace("**Nome:", "").replace("**", "").strip()
+                        nome_membro = nome_linha
+
+                        for linha in linhas:
+                            # Remove formatação de markdown (** __ etc.)
+                            linha_limpa = linha.replace("*", "").replace("_", "").lower()
+
+                            if dia_em_portugues in linha_limpa:
+                                # Captura todos os intervalos tipo "08:00 até 11:00"
+                                intervalos = re.findall(r"(\d{2}:\d{2})\s*até\s*(\d{2}:\d{2})", linha_limpa)
+
+                                for inicio_str, fim_str in intervalos:
+                                    inicio = hora_para_minutos(inicio_str)
+                                    fim = hora_para_minutos(fim_str)
+
+                                    if dentro_do_intervalo(hora_atual, inicio, fim):
+                                        disponiveis.append(nome_membro)
+
+                # === Embed formal ===
+                embed = discord.Embed(
+                    title="📋 Relatório de Disponibilidade",
+                    description=f"**Horário consultado:** {hora_exibicao} UTC\n**Dia da semana:** {dia_em_portugues.capitalize()}",
+                    color=discord.Color.dark_green()
+                )
+
+                if disponiveis:
+                    membros_lista = "\n".join(disponiveis)
+                    embed.add_field(name=f"Membros disponíveis ({len(disponiveis)})", value=membros_lista, inline=False)
+                else:
+                    embed.add_field(name="Membros disponíveis", value="Nenhum membro disponível no momento.", inline=False)
+
+                embed.set_footer(text="Sistema Automático • CLEA")
+
+                await message.channel.send(embed=embed)
+
+            except Exception as e:
+                await message.channel.send(f"⚠️ Erro inesperado: {e}")
+
+    await bot.process_commands(message)
+    
+# --- Execução do Bot ---
+bot.run("x")
