@@ -1,0 +1,152 @@
+import discord
+from discord.ext import commands
+import json
+import os
+import random
+import asyncio
+
+intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="v!", intents=intents)
+
+# cooldowns
+cooldowns = {}
+
+# variáveis que definem os arquivos JSON
+CHANNELS_DB = "ppf_channels.json"
+RESPONSES_DB = "responses.json"
+
+# funções para carregar os arqivos JSON
+def load_json(file):
+    if os.path.exists(file):
+        with open(file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+# função que salva as mudanças no arquivo JSON
+def save_json(file, data):
+    with open(file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+# carrega todos os bancos de dados em JSON
+ppf_channels = load_json(CHANNELS_DB)
+responses = load_json(RESPONSES_DB)
+
+# se o banco de dados estiver vazio, ele inicializa com essas frases no padrao
+if "phrases" not in responses:
+    responses["phrases"] = [
+        "Fala, animal.",
+        "?",
+        "Late.",
+        "Fala, burro.",
+        "Late, burro."
+    ]
+    save_json(RESPONSES_DB, responses)
+
+# lista de cargos permitidos para usar o bot
+ALLOWED_ROLE_IDS = [1326564267100475407, 1326716130890481725, 1345932263698993203, 1345116065046462505, 1326650914622406688]
+
+# cria um decorador que apenas permite o uso dos comandos do bot para os cargos permitidos
+def hasPermission():
+    async def predicate(ctx):
+        if ctx.guild is None: # impede o uso do comando no privado
+            await ctx.send("Este comando apenas pode ser utilizado no servidor!")
+            return False
+        
+        user_roles = [role.id for role in ctx.author.roles]
+        if any(role_id in user_roles for role_id in ALLOWED_ROLE_IDS):
+            return True
+        else:
+            await ctx.reply("Ei! Seu cargo não possui permissão para usar este comando!")
+            return False
+        
+    return commands.check(predicate)
+
+
+# comando para ativar a resposta de PPF em um canal específico que o comando foi executado
+@bot.command()
+@hasPermission()
+async def setppf(ctx):
+    guild_id = str(ctx.guild.id)
+    channel_id = ctx.channel.id
+
+    ppf_channels[guild_id] = channel_id
+    save_json(CHANNELS_DB, ppf_channels)
+
+    await ctx.send(f"Os 'PPF!' agora serão respondidos neste canal!")
+
+# comando para desativar a resposta de PPF em um canal especÃ­fico que o comando foi executado
+@bot.command()
+@hasPermission()
+async def unsetppf(ctx):
+    guild_id = str(ctx.guild.id)
+
+    if guild_id in ppf_channels and ppf_channels[guild_id] == ctx.channel.id:
+        del ppf_channels[guild_id]
+        save_json(CHANNELS_DB, ppf_channels)
+        await ctx.send(f"Vigia não responderá mais aos 'PPF!' neste canal.")
+    else:
+        await ctx.send(f"Este canal não está configurado para responder aos 'PPF!'.")
+
+# comando que adiciona uma frase ao banco de respostas
+@bot.command()
+@hasPermission()
+async def addppf(ctx, *, frase):
+    if frase not in responses["phrases"]:
+        responses["phrases"].append(frase)
+        save_json(RESPONSES_DB, responses)
+        await ctx.send(f'Frase adicionada ao banco de dados: "{frase}"')
+    else:
+        await ctx.send(f"Essa frase já existe no banco de dados!")
+
+# comando para remover uma frase do banco de respostas
+@bot.command()
+@hasPermission()
+async def delppf(ctx, *, frase):
+    if frase in responses["phrases"]:
+        responses["phrases"].remove(frase)
+        save_json(RESPONSES_DB, responses)
+        await ctx.send(f'Frase removida do banco de dados: "{frase}"')
+    else:
+        await ctx.send(f"Essa frase não está no banco de dados!")
+
+
+# evento pra detectar os PPF! e dar as respostas com tempo de espera de 15 segundos
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    guild_id = str(message.guild.id)
+    channel_id = str(message.channel.id)
+    user_id = str(message.author.id) # id do usuario pro controle do tempo de espera (15 segundos)
+
+    # verifica se a mensagem enviada possui "PPF!" e se está no canal configurado no banco de dados
+    if guild_id in ppf_channels and message.channel.id == int(ppf_channels[guild_id]):
+        if "PPF!" in message.content:
+            # inicializa o tempo de espera caso ainda não estejam definidos
+            if guild_id not in cooldowns:
+                cooldowns[guild_id] = {}
+            if channel_id not in cooldowns[guild_id]:
+                cooldowns[guild_id][channel_id] = {}
+
+            # verifica se o usuario está dentro do tempo de espera
+            if user_id in cooldowns[guild_id][channel_id]:
+                remainingTime = cooldowns[guild_id][channel_id][user_id] - asyncio.get_event_loop().time()
+                if remainingTime > 0:
+                    await message.reply(f'Vossa Senhoria precisa esperar **{int(remainingTime)}** segundos antes de pedir "PPF!" novamente, seu animal imundo.')
+                    return
+            
+            # escolhe uma resposta aleatória do banco de dados e envia
+            response = random.choice(responses["phrases"])
+            await message.reply(response)
+
+            # adiciona o tempo de espera de 15 segundos por usuário
+            cooldowns[guild_id][channel_id][user_id] = asyncio.get_event_loop().time() + 5      
+
+    await bot.process_commands(message)       
+
+bot.run("x")
