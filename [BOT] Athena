@@ -1,0 +1,286 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+import os
+from datetime import datetime
+import random
+
+DISCORD_TOKEN = "x"
+CARGO_PERMITIDO_ID = 1511412537118298283 
+# =============================================
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Banco de dados simples em memória para aulas agendadas
+aulas_agendadas: list[dict] = []
+
+# Respostas variadas da Athena ao ser chamada
+RESPOSTAS_ATHENA = [
+    "Estou aqui, senhor Hades! Como posso servi-lo?",
+    "Prontamente, senhor Hades! Às suas ordens.",
+    "Sempre presente, senhor Hades! O que deseja?",
+    "Aqui estou, senhor Hades! Pode falar.",
+    "À disposição, senhor Hades! Em que posso ajudar?",
+    "Sim, senhor Hades! Pronta para o que precisar.",
+    "Athena está aqui, senhor Hades! Fale.",
+]
+
+
+def tem_cargo_permitido(interaction: discord.Interaction) -> bool:
+    """Verifica se o usuário possui o cargo autorizado."""
+    if interaction.guild is None:
+        return False
+    cargo = interaction.guild.get_role(CARGO_PERMITIDO_ID)
+    if cargo is None:
+        return False
+    return cargo in interaction.user.roles
+
+
+# ─────────────────────────────────────────────
+# Event da mensagem da Athena
+# ─────────────────────────────────────────────
+@bot.event
+async def on_message(message: discord.Message):
+    # Ignora mensagens do próprio bot
+    if message.author.bot:
+        return
+
+    # Gatilho: "ATHENA!" (case insensitive)
+    if "ATHENA!" in message.content.upper():
+        resposta = random.choice(RESPOSTAS_ATHENA)
+
+        embed = discord.Embed(
+            description=f"✨ {resposta}",
+            color=discord.Color.from_str("#7B68EE")  # Roxo médio
+        )
+        embed.set_author(
+            name="Athena",
+            icon_url="https://cdn-icons-png.flaticon.com/512/4712/4712035.png"
+        )
+        embed.set_footer(text=f"Chamada por {message.author.display_name}")
+        await message.channel.send(embed=embed)
+
+    # Necessário para que os comandos de prefixo continuem funcionando
+    await bot.process_commands(message)
+
+
+# ─────────────────────────────────────────────
+# /agendar_aula
+# ─────────────────────────────────────────────
+@bot.tree.command(
+    name="agendar_aula",
+    description="Agenda uma aula com professor, alunos, chamada e descrição."
+)
+@app_commands.describe(
+    professor="Nome do professor",
+    alunos="Lista de alunos separados por vírgula",
+    chamada="Link ou código da chamada (ex: meet.google.com/xxx)",
+    texto="Descrição ou tema da aula"
+)
+async def agendar_aula(
+    interaction: discord.Interaction,
+    professor: str,
+    alunos: str,
+    chamada: str,
+    texto: str
+):
+    if not tem_cargo_permitido(interaction):
+        embed = discord.Embed(
+            description="❌ Você não possui o cargo necessário para usar este comando.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    aula = {
+        "id": len(aulas_agendadas) + 1,
+        "professor": professor,
+        "alunos": [a.strip() for a in alunos.split(",")],
+        "chamada": chamada,
+        "descricao": texto,
+        "agendado_por": str(interaction.user),
+        "data_agendamento": agora,
+    }
+    aulas_agendadas.append(aula)
+
+    embed = discord.Embed(
+        title="📚 Aula Agendada com Sucesso!",
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="👨‍🏫 Professor", value=professor, inline=True)
+    embed.add_field(name="🆔 ID da Aula", value=f"#{aula['id']}", inline=True)
+    embed.add_field(name="📅 Agendado em", value=agora, inline=True)
+    embed.add_field(
+        name="👥 Alunos",
+        value="\n".join(f"• {a}" for a in aula["alunos"]),
+        inline=False
+    )
+    embed.add_field(name="🔗 Chamada", value=chamada, inline=False)
+    embed.add_field(name="📝 Descrição", value=texto, inline=False)
+    embed.set_footer(text=f"Agendado por {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────
+# /listar_aulas
+# ─────────────────────────────────────────────
+@bot.tree.command(
+    name="listar_aulas",
+    description="Lista todas as aulas agendadas."
+)
+async def listar_aulas(interaction: discord.Interaction):
+    if not tem_cargo_permitido(interaction):
+        embed = discord.Embed(
+            description="❌ Você não possui o cargo necessário para usar este comando.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if not aulas_agendadas:
+        embed = discord.Embed(
+            description="📭 Nenhuma aula agendada ainda.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="📋 Aulas Agendadas",
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+
+    for aula in aulas_agendadas[-10:]:  # Mostra as últimas 10
+        embed.add_field(
+            name=f"#{aula['id']} — {aula['professor']}",
+            value=(
+                f"👥 **Alunos:** {', '.join(aula['alunos'])}\n"
+                f"🔗 **Chamada:** {aula['chamada']}\n"
+                f"📝 {aula['descricao']}\n"
+                f"📅 {aula['data_agendamento']}"
+            ),
+            inline=False
+        )
+
+    embed.set_footer(text=f"Solicitado por {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────
+# /cancelar_aula
+# ─────────────────────────────────────────────
+@bot.tree.command(
+    name="cancelar_aula",
+    description="Remove uma aula agendada pelo seu ID."
+)
+@app_commands.describe(id_aula="ID da aula a ser cancelada (use /listar_aulas para ver os IDs)")
+async def cancelar_aula(interaction: discord.Interaction, id_aula: int):
+    if not tem_cargo_permitido(interaction):
+        embed = discord.Embed(
+            description="❌ Você não possui o cargo necessário para usar este comando.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    aula_encontrada = next((a for a in aulas_agendadas if a["id"] == id_aula), None)
+
+    if not aula_encontrada:
+        embed = discord.Embed(
+            description=f"❌ Nenhuma aula encontrada com o ID **#{id_aula}**.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    aulas_agendadas.remove(aula_encontrada)
+
+    embed = discord.Embed(
+        title="🗑️ Aula Cancelada",
+        color=discord.Color.red(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="ID", value=f"#{id_aula}", inline=True)
+    embed.add_field(name="Professor", value=aula_encontrada["professor"], inline=True)
+    embed.add_field(name="Descrição", value=aula_encontrada["descricao"], inline=False)
+    embed.set_footer(text=f"Cancelado por {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────
+# Eventos do bot
+# ─────────────────────────────────────────────
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"✅ Bot conectado como {bot.user} (ID: {bot.user.id})")
+    print(f"📡 Slash commands sincronizados!")
+    await bot.change_presence(
+        status=discord.Status.do_not_disturb,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="aulas | ATHENA!"
+        )
+    )
+
+def tem_cargo_permitido(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None:
+        return False
+    cargo = interaction.guild.get_role(CARGO_PERMITIDO_ID)
+    if cargo is None:
+        return False
+    return cargo in interaction.user.roles
+ 
+@bot.tree.command(
+    name="athena",
+    description="Fale como a Athena."
+)
+@app_commands.describe(
+    mensagem="Mensagem que a Athena vai enviar",
+    canal="Canal onde a mensagem será enviada",
+    imagem="Imagem para anexar à mensagem (opcional)"
+)
+async def athena(
+    interaction: discord.Interaction,
+    mensagem: str,
+    canal: discord.TextChannel,
+    imagem: discord.Attachment = None
+):
+    if not tem_cargo_permitido(interaction):
+        await interaction.response.send_message(
+            "❌ Você não possui o cargo necessário para usar este comando.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message("✅ Mensagem enviada!", ephemeral=True)
+
+    embed = discord.Embed(
+        description=mensagem,
+        color=discord.Color.from_str("#7B68EE"),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_author(
+        name="Athena",
+        icon_url="https://cdn-icons-png.flaticon.com/512/4712/4712035.png"
+    )
+
+    if imagem:
+        embed.set_image(url=imagem.url)
+
+    await canal.send(embed=embed)
+
+# ─────────────────────────────────────────────
+# Inicialização
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
