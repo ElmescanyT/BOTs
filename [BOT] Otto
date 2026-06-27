@@ -1,0 +1,695 @@
+DISCORD_TOKEN=("x")
+import discord
+from discord.ext import commands
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
+from datetime import datetime, timedelta, timezone
+import json
+import random
+from discord.ui import View, Button
+
+TOKEN = "x"
+CANAL_LOGS_ID = 1388665874776326154  # Substitua pelo ID do canal de logs
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+scheduler = AsyncIOScheduler(timezone=timezone.utc)
+
+EVENTO_FILE = "eventos.json"
+TORNEIOS_FILE = "torneios.json"
+
+CARGOS_AUTORIZADOS = [1218525300259029043, 1218308965956321360]
+
+def tem_permissao(usuario):
+    return any(role.id in CARGOS_AUTORIZADOS for role in getattr(usuario, 'roles', []))
+
+def carregar_json(caminho):
+    try:
+        with open(caminho, "r") as f:
+            return json.load(f)
+    except:
+        if "torneios" in caminho:
+            return {}
+        return []
+
+def salvar_json(caminho, dados):
+    with open(caminho, "w") as f:
+        json.dump(dados, f, indent=4)
+
+async def enviar_log(mensagem: str):
+    canal_logs = bot.get_channel(CANAL_LOGS_ID)
+    if canal_logs:
+        await canal_logs.send(mensagem)
+
+@bot.event
+async def on_ready():
+    print(f"✅ Bot online como {bot.user}")
+    if not scheduler.running:
+        scheduler.start()
+    try:
+        canal_inicial = bot.get_channel(1388665874776326154)
+        if canal_inicial:
+            embed = discord.Embed(
+                title="🎉 Bot Iniciado com Sucesso - Tema Junino",
+                color=0x00FF00,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.set_author(name=str(bot.user), icon_url=bot.user.avatar.url if bot.user.avatar else None)
+            embed.add_field(name="Status", value="Online e Operacional - Ligado por: <@1123727052705636424>", inline=False)
+            embed.add_field(name="Horário UTC 0", value=datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S"), inline=False)
+            embed.set_footer(text="Sistema automático de notificações - Viva São João! 🎇")
+            await canal_inicial.send(embed=embed)
+    except Exception as e:
+        print(f"Erro ao enviar mensagem inicial: {e}")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    conteudo = message.content.lower().replace(",", "").replace(".", "").strip()
+
+    # ---------------------------------------
+    # Cumprimentos ao Otto
+    if any(trigger in conteudo for trigger in [
+        "oi otto", "olá otto", "ola otto", "fala otto", "e aí otto", 
+        "salve otto", "saudações otto", "saudacoes otto", "bom dia otto", 
+        "boa tarde otto", "boa noite otto"
+    ]):
+        respostas_oi = [
+            f"Apresentando-se, {message.author.mention}! Otto na escuta! 🫡📡",
+            f"Fala, guerreiro(a) {message.author.display_name}! Já tomou seu café de rancho hoje? ☕🫥",
+            f"Otto online e motivado! Qual a missão do dia, {message.author.mention}? 🎖️⚔️",
+            f"Presente! Se for missão, tô dentro! 🚁",
+            f"E aí, {message.author.display_name}! Tá pronto pro próximo evento ou ainda tá de folga na guarita? 🧱🪖",
+            f"Se o evento tá chegando, eu tô de olho! 👀 Aqui é o Otto, mascote oficial do *Quartel dos Eventos*! 🪖🎯",
+        ]
+        await message.channel.send(random.choice(respostas_oi))
+
+    # ---------------------------------------
+    # Pergunta: tudo bem?
+    elif "tudo bem" in conteudo or "tudo certo" in conteudo:
+        respostas_tb = [
+            f"Mais firme que estaca no solo, {message.author.mention}! E contigo, tudo operacional? 🛠️",
+            f"Na mais perfeita ordem, tipo TFM às 06h! 🪖",
+            f"Se o servidor tá de pé, eu tô tranquilo. Se cair, eu levanto ele na base do grito de guerra! 📢🔥",
+            f"Tudo certo por aqui! Já fez sua ronda hoje, {message.author.display_name}? 🚨",
+        ]
+        await message.channel.send(random.choice(respostas_tb))
+
+    # ---------------------------------------
+    # Pedido de ajuda
+    elif "preciso de ajuda" in conteudo or "me ajuda" in conteudo or "pode me ajudar" in conteudo:
+        respostas_ajuda = [
+            f"Ordem recebida! Diga sua necessidade, combatente {message.author.display_name}. 🧭",
+            f"Pode falar, recruta! Otto sempre pronto pra missão de resgate. 🪂",
+            f"Ajuda é comigo mesmo! Lança a bronca, {message.author.mention}, que eu dou cobertura! 🔫",
+            f"Se for dúvida sobre evento, torneio ou até como não dormir na instrução, eu sei tudo! 🤓",
+        ]
+        await message.channel.send(random.choice(respostas_ajuda))
+
+    # ---------------------------------------
+    # Agradecimento
+    elif "obrigado" in conteudo or "valeu otto" in conteudo or "agradecido" in conteudo:
+        respostas_agradecimento = [
+            f"Missão dada, missão cumprida, {message.author.mention}! ✅",
+            f"De nada, guerreiro(a)! Agora volta pro evento que o show não pode parar! 🎉🪖",
+            f"Otto sempre de serviço! Se precisar, é só chamar no rádio! 📻🫡",
+            f"Disponha! E se quiser me agradecer de verdade, traz um PF do rancho que eu tô só o osso 🍛🤣",
+        ]
+        await message.channel.send(random.choice(respostas_agradecimento))
+
+    await bot.process_commands(message)
+    
+# ===============================================
+# Criar torneio
+# ===============================================
+@bot.command()
+async def criar_torneio(
+    ctx,
+    nome: str,
+    canal: discord.TextChannel = None,
+    cargo: discord.Role = None,
+    *,
+    regras: str = "Nenhuma regra especificada"
+):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio já existe.", color=0xE74C3C))
+
+    canal = canal or ctx.channel
+
+    torneios[nome] = {
+        "jogadores": [],
+        "chaves": [],
+        "regras": regras,
+        "canal_id": canal.id
+    }
+    salvar_json(TORNEIOS_FILE, torneios)
+
+    embed = discord.Embed(
+        title=f"Torneio criado: {nome}",
+        description=f"**Informativos:**\n{regras}\n\n📍 Canal Oficial do Torneio: {canal.mention}",
+        color=0xF39C12
+    )
+
+    # Mencionar cargo fora do embed, se fornecido
+    if cargo:
+        await canal.send(content=f"{cargo.mention}")
+
+    await canal.send(embed=embed)
+    await ctx.reply(embed=discord.Embed(description="✅ Torneio criado com sucesso!", color=0x2ECC71))
+
+# ===============================================
+# Adicionar jogadores com limite
+# ===============================================
+@bot.command()
+async def adicionar_jogador(ctx, nome_torneio: str, *jogadores: discord.Member):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+    if len(jogadores) == 0 or len(jogadores) > 5:
+        return await ctx.reply(embed=discord.Embed(description="⚠️ Você deve adicionar entre 1 e 5 jogadores por vez.", color=0xF1C40F))
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+
+    adicionados = []
+    ja_adicionados = []
+    for jogador in jogadores:
+        if str(jogador.id) not in torneios[nome_torneio]["jogadores"]:
+            torneios[nome_torneio]["jogadores"].append(str(jogador.id))
+            adicionados.append(jogador.mention)
+        else:
+            ja_adicionados.append(jogador.mention)
+    salvar_json(TORNEIOS_FILE, torneios)
+    embed = discord.Embed(title=f"Jogadores adicionados ao torneio {nome_torneio}:", color=0x2ECC71)
+    if adicionados:
+        embed.add_field(name="✅ Adicionados", value="\n".join(adicionados), inline=False)
+    if ja_adicionados:
+        embed.add_field(name="⚠️ Já estavam no torneio", value="\n".join(ja_adicionados), inline=False)
+    await ctx.reply(embed=embed)
+
+# ===============================================
+# Remover jogadores
+# ===============================================
+@bot.command()
+async def remover_jogador(ctx, nome_torneio: str, jogador: discord.Member):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+    try:
+        torneios[nome_torneio]["jogadores"].remove(str(jogador.id))
+        salvar_json(TORNEIOS_FILE, torneios)
+        await ctx.reply(embed=discord.Embed(description=f"❌ {jogador.mention} foi removido do torneio {nome_torneio}.", color=0xE74C3C))
+    except ValueError:
+        await ctx.reply(embed=discord.Embed(description="⚠️ Jogador não está no torneio.", color=0xF1C40F))
+
+# ===============================================
+# Gerar chave
+# ===============================================
+@bot.command()
+async def gerar_chave(ctx, nome_torneio: str):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+
+    if "chaves" in torneios[nome_torneio] and any(c.get("ganhador") is None for c in torneios[nome_torneio]["chaves"]):
+        class ConfirmView(View):
+            def __init__(self):
+                super().__init__(timeout=30)
+                self.value = None
+
+            @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.success)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = True
+                await interaction.response.edit_message(content="🔄 Novo chaveamento será gerado...", view=None)
+                self.stop()
+
+            @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.value = False
+                await interaction.response.edit_message(content="❌ Ação cancelada.", view=None)
+                self.stop()
+
+        view = ConfirmView()
+        await ctx.reply(embed=discord.Embed(description="⚠️ Já existe um chaveamento em andamento. Deseja substituir?", color=0xF39C12), view=view)
+        await view.wait()
+        if not view.value:
+            return
+
+    jogadores = torneios[nome_torneio]["jogadores"]
+    if len(jogadores) < 2:
+        return await ctx.reply(embed=discord.Embed(description="❌ É necessário pelo menos 2 jogadores para gerar um chaveamento.", color=0xE74C3C))
+
+    random.shuffle(jogadores)
+    chaves = []
+    for i in range(0, len(jogadores), 2):
+        j1 = jogadores[i]
+        j2 = jogadores[i+1] if i+1 < len(jogadores) else None
+        chaves.append({"j1": j1, "j2": j2, "ganhador": None})
+
+    torneios[nome_torneio]["chaves"] = chaves
+    salvar_json(TORNEIOS_FILE, torneios)
+
+    canal = bot.get_channel(torneios[nome_torneio]["canal_id"])
+    embed = discord.Embed(title=f"🎯 Chaveamento Atualizado: {nome_torneio}", description="Confira os confrontos atualizados.", color=0x9B59B6)
+    for i, chave in enumerate(chaves):
+        j1 = await ctx.guild.fetch_member(int(chave['j1']))
+        if chave['j2']:
+            j2 = await ctx.guild.fetch_member(int(chave['j2']))
+            embed.add_field(name=f"Chave {i+1:02d}", value=f"🎮 {j1.display_name} vs {j2.display_name}", inline=False)
+        else:
+            embed.add_field(name=f"Chave {i+1:02d}", value=f"🎟️ {j1.display_name} avançou automaticamente.", inline=False)
+    await canal.send(embed=embed)
+
+# ===============================================
+# Registrar resultado e autogeração da próxima rodada
+# ===============================================
+@bot.command()
+async def resultado_chave(ctx, nome_torneio: str, numero: int, ganhador: discord.Member):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+
+    try:
+        chave = torneios[nome_torneio]["chaves"][numero - 1]
+        chave["ganhador"] = str(ganhador.id)
+        salvar_json(TORNEIOS_FILE, torneios)
+
+        await ctx.reply(embed=discord.Embed(description=f"✅ Resultado registrado. {ganhador.mention} venceu a Chave {numero:02d}!", color=0x2ECC71))
+
+        canal = bot.get_channel(torneios[nome_torneio]["canal_id"])
+
+        # Deleta a última mensagem de chaveamento, se existir
+        ultima_msg_id = torneios[nome_torneio].get("ultima_msg_chaveamento")
+        if ultima_msg_id:
+            try:
+                ultima_msg = await canal.fetch_message(ultima_msg_id)
+                await ultima_msg.delete()
+            except:
+                pass  # ignora se não conseguir deletar
+
+        # Cria novo embed com chaveamento atualizado
+        embed_chaves = discord.Embed(title=f"📋 Chaveamento Atualizado - {nome_torneio}", color=0x3498DB)
+        for i, chave in enumerate(torneios[nome_torneio]["chaves"]):
+            j1 = await ctx.guild.fetch_member(int(chave["j1"]))
+            j1_nome = j1.display_name
+            if chave["j2"]:
+                j2 = await ctx.guild.fetch_member(int(chave["j2"]))
+                j2_nome = j2.display_name
+                resultado = f"{j1_nome} vs {j2_nome}"
+            else:
+                resultado = f"{j1_nome} passou direto"
+
+            ganhador_id = chave.get("ganhador")
+            if ganhador_id:
+                ganhador_nome = await ctx.guild.fetch_member(int(ganhador_id))
+                resultado += f"\n🏅 Vencedor: {ganhador_nome.display_name}"
+
+            embed_chaves.add_field(name=f"Chave {i+1:02d}", value=resultado, inline=False)
+
+        nova_msg = await canal.send(embed=embed_chaves)
+        torneios[nome_torneio]["ultima_msg_chaveamento"] = nova_msg.id
+        salvar_json(TORNEIOS_FILE, torneios)
+
+        # Se todos os vencedores foram definidos, inicia nova rodada ou finaliza
+        if all(c.get("ganhador") for c in torneios[nome_torneio]["chaves"]):
+            vencedores = [c["ganhador"] for c in torneios[nome_torneio]["chaves"]]
+
+            if len(vencedores) == 1:
+                vencedor_final = await ctx.guild.fetch_member(int(vencedores[0]))
+                embed = discord.Embed(
+                    title=f"🏆 CAMPEÃO - {nome_torneio}",
+                    description=f"Parabéns {vencedor_final.mention}! Você venceu o torneio 🎉",
+                    color=0xFFD700
+                )
+                await canal.send(embed=embed)
+                return
+
+            random.shuffle(vencedores)
+            nova_rodada = []
+            for i in range(0, len(vencedores), 2):
+                j1 = vencedores[i]
+                j2 = vencedores[i+1] if i+1 < len(vencedores) else None
+                nova_rodada.append({"j1": j1, "j2": j2, "ganhador": None})
+
+            torneios[nome_torneio]["chaves"] = nova_rodada
+            salvar_json(TORNEIOS_FILE, torneios)
+
+            embed = discord.Embed(
+                title=f"🔁 Nova Rodada - {nome_torneio}",
+                description="Iniciando nova rodada com os vencedores anteriores.",
+                color=0x1ABC9C
+            )
+            for i, chave in enumerate(nova_rodada):
+                j1 = await ctx.guild.fetch_member(int(chave['j1']))
+                if chave['j2']:
+                    j2 = await ctx.guild.fetch_member(int(chave['j2']))
+                    embed.add_field(name=f"Chave {i+1:02d}", value=f"🎮 {j1.display_name} vs {j2.display_name}", inline=False)
+                else:
+                    embed.add_field(name=f"Chave {i+1:02d}", value=f"🎟️ {j1.display_name} passou direto para próxima rodada", inline=False)
+            await canal.send(embed=embed)
+
+    except Exception as e:
+        return await ctx.reply(embed=discord.Embed(description=f"❌ Erro ao registrar resultado: {e}", color=0xE74C3C))
+
+# ===============================================
+# Ver jogadores
+# ===============================================
+@bot.command()
+async def ver_jogadores(ctx, nome_torneio: str):
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+    jogadores = torneios[nome_torneio]["jogadores"]
+    if not jogadores:
+        return await ctx.reply(embed=discord.Embed(description="👥 Nenhum jogador adicionado.", color=0x95A5A6))
+    nomes = []
+    for j in jogadores:
+        try:
+            membro = await ctx.guild.fetch_member(int(j))
+            nomes.append(membro.display_name)
+        except:
+            nomes.append(f"Desconhecido ({j})")
+    embed = discord.Embed(title=f"🎮 Jogadores do Torneio: {nome_torneio}", description="\n".join(f"- {n}" for n in nomes), color=0x2980B9)
+    await ctx.reply(embed=embed)
+
+# ===============================================
+# Ver resultados
+# ===============================================
+@bot.command()
+async def ver_resultados(ctx, nome_torneio: str):
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+    embed = discord.Embed(title=f"📈 Resultados: {nome_torneio}", color=0x8E44AD)
+    for i, chave in enumerate(torneios[nome_torneio].get("chaves", [])):
+        if chave.get("ganhador"):
+            try:
+                vencedor = await ctx.guild.fetch_member(int(chave["ganhador"]))
+                embed.add_field(name=f"Chave {i+1:02d}", value=f"🏆 {vencedor.display_name}", inline=False)
+            except:
+                embed.add_field(name=f"Chave {i+1:02d}", value=f"🏆 Desconhecido ({chave['ganhador']})", inline=False)
+        else:
+            embed.add_field(name=f"Chave {i+1:02d}", value="⏳ Aguardando resultado...", inline=False)
+    await ctx.reply(embed=embed)
+
+# ===============================================
+# Deletar torneio
+# ===============================================
+@bot.command()
+async def deletar_torneio(ctx, nome_torneio: str):
+    if not tem_permissao(ctx.author):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Sem permissão.", color=0xE74C3C))
+
+    torneios = carregar_json(TORNEIOS_FILE)
+    if nome_torneio not in torneios:
+        return await ctx.reply(embed=discord.Embed(description="❌ Torneio não encontrado.", color=0xE74C3C))
+
+    class ConfirmarDelete(View):
+        def __init__(self):
+            super().__init__(timeout=30)
+            self.value = None
+
+        @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+        async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.value = True
+            await interaction.response.edit_message(content=f"✅ Torneio **{nome_torneio}** deletado com sucesso!", embed=None, view=None)
+            self.stop()
+
+        @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+        async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.value = False
+            await interaction.response.edit_message(content="❌ Ação cancelada.", embed=None, view=None)
+            self.stop()
+
+    view = ConfirmarDelete()
+    await ctx.reply(embed=discord.Embed(description=f"⚠️ Deseja realmente deletar o torneio **{nome_torneio}**?", color=0xE67E22), view=view)
+    await view.wait()
+
+    if view.value:
+        torneios.pop(nome_torneio)
+        salvar_json(TORNEIOS_FILE, torneios)
+        await enviar_log(f"🗑️ Torneio **{nome_torneio}** deletado por {ctx.author.mention}.")
+    else:
+        await ctx.reply(embed=discord.Embed(description="❌ Deleção cancelada.", color=0x95A5A6))
+
+# ===============================================
+# Ajuda
+# ===============================================
+@bot.command(name="ajuda")
+async def mostrar_ajuda(ctx):
+    embed = discord.Embed(title="📘 Ajuda Junina - Comandos do Bot", color=0x3498DB)
+    
+    embed.add_field(name="!agendar <título> <data DD/MM/AAAA> <hora HH:MM> <link> <canal>", 
+                    value="Agendar evento no formato brasileiro (UTC 0).", inline=False)
+    embed.add_field(name="!criar_torneio <nome> <canal> <menção> <regras>", 
+                    value="Criar torneio com regras personalizadas.", inline=False)
+    embed.add_field(name="!adicionar_jogador <nome_torneio> @jogador1 ... @jogador5", 
+                    value="Adicionar até 5 jogadores por vez.", inline=False)
+    embed.add_field(name="!remover_jogador <nome_torneio> @jogador", 
+                    value="Remover jogador do torneio.", inline=False)
+    embed.add_field(name="!gerar_chave <nome_torneio>", 
+                    value="Gerar chaveamento. Se já existir, pede confirmação para substituir.", inline=False)
+    embed.add_field(name="!resultado_chave <nome_torneio> <número_chave> @vencedor", 
+                    value="Registrar vencedor de uma chave e gerar próxima rodada automaticamente.", inline=False)
+    embed.add_field(name="!ver_jogadores <nome_torneio>", 
+                    value="Mostrar jogadores do torneio.", inline=False)
+    embed.add_field(name="!ver_resultados <nome_torneio>", 
+                    value="Exibir resultados das chaves.", inline=False)
+    embed.add_field(name="!deletar_torneio <nome_torneio>", 
+                    value="Deletar torneio com confirmação.", inline=False)
+    
+    # Comandos adicionais de moderação e utilidades que você tem (se desejar pode adicionar mais aqui)
+    embed.add_field(name="!mute <@usuario> <código>", 
+                    value="Aplicar mute automático com código de infração.", inline=False)
+    embed.add_field(name="!ban <@usuario> <código>", 
+                    value="Aplicar banimento automático com código de infração.", inline=False)
+    embed.add_field(name="!codigos", 
+                    value="Mostrar lista dos códigos de mute e ban disponíveis.", inline=False)
+    
+    embed.set_footer(text="Sistema tematizado para as festas juninas 🎉")
+    await ctx.reply(embed=embed)
+    
+# ===============================================
+# Autorizados
+# ===============================================
+IDS_AUTORIZADOS = [1379197177762414592, 1348692738064912515, 1348692847523532802]
+CANAL_LOGS_ID = 1388665874776326154
+
+# ===============================================
+# Código de mutes e suas durações
+# ===============================================
+codigos_mute = {
+    210: ("Marcar pessoas importantes", "1 dia"),
+    305: ("Abrir tíquetes sem motivo", "1 hora"),
+    416: ("Spamming", "1 dia"),
+    322: ("Linguagem ofensiva", "10 horas"),
+    510: ("Conteúdo inapropriado (leve)", "1 dia"),
+    609: ("Violação das regras do servidor", "1 semana"),
+    401: ("Ofensa a membros", "1 hora"),
+    707: ("Preconceito, xenofobia ou homofobia", "1 semana"),
+    103: ("Comandos em canais errados", "1 hora"),
+    888: ("Discussões provocativas", "1 hora"),
+    199: ("Desrespeito à moderação", "7 dias"),
+    333: ("Divulgação sem autorização", "12 horas"),
+    913: ("Perturbar eventos", "7 dias"),
+    666: ("Menções desnecessárias", "1 dia"),
+    515: ("Fingir autoridade", "1 dia"),
+    123: ("Nome/avatar inapropriado", "1 dia"),
+    919: ("Abuso de canais de voz", "1 dia"),
+    912: ("Desobedecer ordens durante operações", "1 dia"),
+    404: ("Linguagem ambígua para burlar regras", "7 dias"),
+}
+
+@bot.command()
+async def mute(ctx, membro: discord.Member, codigo: int):
+    # Verifica se o autor tem um dos cargos autorizados
+    if not any(role.id in IDS_AUTORIZADOS for role in ctx.author.roles):
+        return await ctx.reply(embed=discord.Embed(
+            description="🚫 Você não tem permissão para usar este comando.",
+            color=0xE74C3C
+        ))
+
+    if codigo not in codigos_mute:
+        return await ctx.reply(embed=discord.Embed(
+            description="❌ Código de mute inválido.",
+            color=0xE67E22
+        ))
+
+    motivo, tempo_str = codigos_mute[codigo]
+
+    # Converte o tempo para timedelta
+    if "hora" in tempo_str:
+        duracao = timedelta(hours=int(tempo_str.split()[0]))
+    elif "dia" in tempo_str:
+        duracao = timedelta(days=int(tempo_str.split()[0]))
+    elif "semana" in tempo_str:
+        duracao = timedelta(weeks=int(tempo_str.split()[0]))
+    elif "minuto" in tempo_str:
+        duracao = timedelta(minutes=int(tempo_str.split()[0]))
+    else:
+        return await ctx.reply("⛔ Erro no tempo do código. Informe o responsável.")
+
+    # Define horário com timezone UTC
+    until = datetime.now(timezone.utc) + duracao
+
+    try:
+        await membro.timeout(until)
+    except Exception as e:
+        return await ctx.reply(embed=discord.Embed(
+            description=f"❌ Erro ao aplicar mute: `{e}`",
+            color=0xE74C3C
+        ))
+
+    # Embed de log
+    embed = discord.Embed(title="🔇 MUTE APLICADO", color=0x3498DB)
+    embed.add_field(name="👤 Membro", value=membro.mention, inline=True)
+    embed.add_field(name="🕒 Duração", value=tempo_str, inline=True)
+    embed.add_field(name="📋 Motivo", value=motivo, inline=False)
+    embed.add_field(name="📄 Código", value=str(codigo), inline=True)
+    embed.add_field(name="🪖 Responsável", value=ctx.author.mention, inline=False)
+    embed.set_footer(text="Sistema disciplinar automático • Quartel dos Eventos")
+
+    # Feedback no canal onde o comando foi executado
+    await ctx.send(
+        f"+mute {membro.mention} {tempo_str} {motivo} code: {codigo} Responsável: {ctx.author.mention}"
+    )
+
+    # Envia o embed no canal de logs
+    canal_logs = bot.get_channel(CANAL_LOGS_ID)
+    if canal_logs:
+        await canal_logs.send(embed=embed)
+        
+# ===============================================
+# Ban
+# ===============================================
+codigos_ban = {
+    911: "Conteúdo inapropriado (grave)",
+    414: "Manipular membros",
+    323: "Uso de bots para spam",
+    525: "Scripts maliciosos",
+    808: "Violação grave das regras",
+    606: "Violação de privacidade",
+    7:   "Acesso indevido a dados",
+    999: "Vazamento de informações confidenciais",
+    212: "Ameaças ou insultos",
+    313: "Conotação sexual",
+    818: "Vazamento de identidade ou dados pessoais",
+    717: "Recrutamento para outros servidores",
+    616: "Contas para burlar punições",
+    666: "Incitação à desobediência",
+    434: "Ataques contra a instituição",
+    112: "Ameaça física ou psicológica",
+    909: "Conteúdo terrorista/extremista",
+    223: "Conteúdo violento",
+    515: "Comércio sem autorização",
+    777: "Apologia ao crime/drogas",
+}
+@bot.command()
+async def ban(ctx, membro: discord.Member, codigo: int):
+    if not any(role.id in IDS_AUTORIZADOS for role in ctx.author.roles):
+        return await ctx.reply(embed=discord.Embed(description="🚫 Você não tem permissão para usar este comando.", color=0xE74C3C))
+
+    if codigo not in codigos_ban:
+        return await ctx.reply(embed=discord.Embed(description="❌ Código de banimento inválido.", color=0xE67E22))
+
+    motivo = codigos_ban[codigo]
+
+    embed = discord.Embed(title="🚫 BANIMENTO APLICADO", color=0xE74C3C)
+    embed.add_field(name="👤 Membro", value=membro.mention, inline=True)
+    embed.add_field(name="📋 Motivo", value=motivo, inline=False)
+    embed.add_field(name="📄 Código", value=str(codigo), inline=True)
+    embed.add_field(name="🪖 Responsável", value=ctx.author.mention, inline=False)
+    embed.set_footer(text="Sistema disciplinar automático • Quartel dos Eventos")
+
+    await ctx.send(f"+ban {membro.mention} {motivo} code: {codigo} Responsável: {ctx.author.mention}")
+
+    canal_logs = bot.get_channel(CANAL_LOGS_ID)
+    if canal_logs:
+        await canal_logs.send(embed=embed)
+
+    try:
+        await membro.ban(reason=f"{motivo} - Código {codigo} - Aplicado por {ctx.author}")
+    except Exception as e:
+        await ctx.reply(embed=discord.Embed(description=f"❌ Erro ao aplicar ban: `{e}`", color=0xE74C3C))
+
+# ===============================================
+# Codigos
+# ===============================================
+codigos_mute = {
+    210: ("Marcar pessoas importantes", "1 dia"),
+    305: ("Abrir tíquetes sem motivo", "1 hora"),
+    416: ("Spamming", "1 dia"),
+    322: ("Linguagem ofensiva", "10 horas"),
+    510: ("Conteúdo inapropriado (leve)", "1 dia"),
+    609: ("Violação das regras do servidor", "1 semana"),
+    401: ("Ofensa a membros", "1 hora"),
+    707: ("Preconceito, xenofobia ou homofobia", "1 semana"),
+    103: ("Comandos em canais errados", "1 hora"),
+    888: ("Discussões provocativas", "1 hora"),
+    199: ("Desrespeito à moderação", "7 dias"),
+    333: ("Divulgação sem autorização", "12 horas"),
+    913: ("Perturbar eventos", "7 dias"),
+    666: ("Menções desnecessárias", "1 dia"),
+    515: ("Fingir autoridade", "1 dia"),
+    123: ("Nome/avatar inapropriado", "1 dia"),
+    919: ("Abuso de canais de voz", "1 dia"),
+    912: ("Desobedecer ordens durante operações", "1 dia"),
+    404: ("Linguagem ambígua para burlar regras", "7 dias"),
+}
+
+codigos_ban = {
+    911: "Conteúdo inapropriado (grave)",
+    414: "Manipular membros",
+    323: "Uso de bots para spam",
+    525: "Scripts maliciosos",
+    808: "Violação grave das regras",
+    606: "Violação de privacidade",
+    7:   "Acesso indevido a dados",
+    999: "Vazamento de informações confidenciais",
+    212: "Ameaças ou insultos",
+    313: "Conotação sexual",
+    818: "Vazamento de identidade ou dados pessoais",
+    717: "Recrutamento para outros servidores",
+    616: "Contas para burlar punições",
+    666: "Incitação à desobediência",
+    434: "Ataques contra a instituição",
+    112: "Ameaça física ou psicológica",
+    909: "Conteúdo terrorista/extremista",
+    223: "Conteúdo violento",
+    515: "Comércio sem autorização",
+    777: "Apologia ao crime/drogas",
+}
+
+@bot.command()
+async def codigos(ctx):
+    embed_mute = discord.Embed(title="🔇 Códigos de MUTE", color=0x3498DB)
+    embed_mute.description = "\n".join([
+        f"**{codigo}** - {motivo} [`{tempo}`]" for codigo, (motivo, tempo) in codigos_mute.items()
+    ])
+    embed_mute.set_footer(text="Quartel dos Eventos • Sistema Disciplinar")
+
+    embed_ban = discord.Embed(title="🚫 Códigos de BANIMENTO", color=0xE74C3C)
+    embed_ban.description = "\n".join([
+        f"**{codigo}** - {motivo}" for codigo, motivo in codigos_ban.items()
+    ])
+    embed_ban.set_footer(text="Quartel dos Eventos • Sistema Disciplinar")
+
+    await ctx.reply(embeds=[embed_mute, embed_ban])
+
+bot.run("x")
