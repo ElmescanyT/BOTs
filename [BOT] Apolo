@@ -1,0 +1,656 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+TOKEN = "x"
+
+GUILD_ID = 1519476264761692325  
+
+CANAL_PAGAMENTOS = 1519488043428610098
+CARGO_CLIENTE = 1519484107049013338
+CARGO_PERMITIDO = {
+    1520073329883611196,
+    1519478864936697966,
+    1519488425839956029,
+    1520091892111638618
+}
+CANAL_CADASTROS = 1519488291764961330
+
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+intents.message_content = True
+
+SERVICOS = {
+    1: ("Sistema de Tickets", "R$ 25,00"),
+    2: ("Sistema de Sugestão", "R$ 15,00"),
+    3: ("Sistema de Denúncia", "R$ 20,00"),
+    4: ("Sistema de Advertência", "R$ 20,00"),
+    5: ("Sistema de AutoModeração", "R$ 40,00"),
+    6: ("Sistema de Logs completo", "R$ 20,00"),
+    7: ("Sistema de Verificação do Roblox", "R$ 15,00"),
+    8: ("Sistema de Boas-Vindas Personalizado c/informações em Embed", "R$ 15,00"),
+    9: ("Sistema de Ranking com sistema de níveis incluso", "R$ 40,00"),
+    10: ("Correção de Bugs simples", "R$ 15,00"),
+    11: ("Correção de Bugs Complexos", "R$ 30,00"),
+    12: ("Atualização de Sistemas", "R$ 15,00"),
+    13: ("Pacote BOT Básico", "R$ 50,00"),
+    14: ("Pacote BOT Intermediário", "R$ 120,00"),
+    15: ("Pacote BOT Premium", "R$ 250,00")
+}
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
+
+CANAL_SERVICOS = 1520096787149488308
+CANAL_AVISOS = 1520112577596620860
+CARGO_EQUIPE = 1520091892111638618
+CANAL_DIRETOR = 1519508120110633051
+
+GMT_MINUS_3 = timezone(timedelta(hours=-3))
+
+class ServicoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Recusar", style=discord.ButtonStyle.danger, emoji="❌", custom_id="servico_recusar")
+    async def recusar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.guild.get_channel(CANAL_AVISOS)
+        cargo = interaction.guild.get_role(CARGO_EQUIPE)
+
+        aviso = discord.Embed(
+            title="❌ Serviço Recusado",
+            description=(
+                "O Diretor de Programação recusou a solicitação.\n\n"
+                f"Entre em contato com o Diretor em <#{CANAL_DIRETOR}> "
+                "para verificar o motivo e posteriormente comunicar o cliente."
+            ),
+            color=discord.Color.red(),
+            timestamp=datetime.now(GMT_MINUS_3)
+        )
+        aviso.set_author(name="Administrador Chefe de Programação • Apolo")
+        aviso.add_field(name="Status", value="❌ Cancelado", inline=True)
+        aviso.set_footer(text="AetherScany • Gerenciamento de Serviços")
+
+        if canal:
+            await canal.send(content=cargo.mention, embed=aviso)
+
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.red()
+        embed.add_field(name="📌 Status", value="❌ Serviço Recusado", inline=False)
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message("Serviço recusado.", ephemeral=True)
+
+    @discord.ui.button(label="Aceitar", style=discord.ButtonStyle.success, emoji="✅", custom_id="servico_aceitar")
+    async def aceitar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.guild.get_channel(CANAL_AVISOS)
+        cargo = interaction.guild.get_role(CARGO_EQUIPE)
+
+        aviso = discord.Embed(
+            title="✅ Serviço Aprovado",
+            description=(
+                "O Diretor de Programação aprovou o serviço.\n\n"
+                "Solicitamos orientar o cliente a efetuar o pagamento para início do desenvolvimento."
+            ),
+            color=discord.Color.green(),
+            timestamp=datetime.now(GMT_MINUS_3)
+        )
+        aviso.set_author(name="Administrador Chefe de Programação • Apolo")
+        aviso.add_field(name="Status", value="✅ Aprovado", inline=True)
+        aviso.set_footer(text="AetherScany • Gerenciamento de Serviços")
+
+        if canal:
+            await canal.send(content=cargo.mention, embed=aviso)
+
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.green()
+        embed.add_field(name="📌 Status", value="✅ Serviço Aceito", inline=False)
+
+        for item in self.children:
+            if item.custom_id in ("servico_recusar","servico_aceitar"):
+                item.disabled = True
+
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message("Serviço aprovado.", ephemeral=True)
+
+    @discord.ui.button(label="Iniciar Projeto", style=discord.ButtonStyle.secondary, emoji="🟡", custom_id="servico_iniciar")
+    async def iniciar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.orange()
+        embed.add_field(
+            name="🚀 Projeto Iniciado",
+            value=datetime.now(GMT_MINUS_3).strftime("%d/%m/%Y às %H:%M"),
+            inline=False
+        )
+        button.disabled = True
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message("Projeto iniciado.", ephemeral=True)
+
+    @discord.ui.button(label="Entregar Projeto", style=discord.ButtonStyle.primary, emoji="📦", custom_id="servico_entregar")
+    async def entregar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.guild.get_channel(CANAL_AVISOS)
+        cargo = interaction.guild.get_role(CARGO_EQUIPE)
+
+        aviso = discord.Embed(
+            title="📦 Projeto Finalizado",
+            description="O projeto foi concluído. Iniciem o procedimento de pré-entrega ao cliente.",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(GMT_MINUS_3)
+        )
+        aviso.set_author(name="Administrador Chefe de Programação • Apolo")
+        aviso.add_field(name="Status", value="📦 Finalizado", inline=True)
+        aviso.set_footer(text="AetherScany • Gerenciamento de Serviços")
+
+        if canal:
+            await canal.send(content=cargo.mention, embed=aviso)
+
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.blue()
+        embed.add_field(
+            name="📦 Entrega",
+            value=datetime.now(GMT_MINUS_3).strftime("%d/%m/%Y às %H:%M"),
+            inline=False
+        )
+
+        button.disabled = True
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message(
+            "Projeto enviado para pré-entrega.",
+            ephemeral=True
+        )
+
+
+def possui_permissao(member: discord.Member):
+    return any(cargo.id in CARGO_PERMITIDO for cargo in member.roles)
+
+
+@bot.event
+async def on_ready():
+
+    await bot.change_presence(
+        status=discord.Status.dnd,
+        activity=discord.Game("Sistema Apollo")
+    )
+
+    # Mantém os botões funcionando após reiniciar o bot
+    bot.add_view(ServicoView())
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"{len(synced)} comandos sincronizados.")
+    except Exception as e:
+        print(e)
+
+    print(f"Logado como {bot.user}")
+
+
+# ==========================
+# /informar
+# ==========================
+@bot.tree.command(
+    name="informar",
+    description="Envia uma informação em embed."
+)
+@app_commands.describe(
+    canal="Canal onde será enviada a mensagem",
+    mensagem="Mensagem a ser enviada"
+)
+async def informar(
+    interaction: discord.Interaction,
+    canal: discord.TextChannel,
+    mensagem: str
+):
+    if not possui_permissao(interaction.user):
+        embed = discord.Embed(
+            title="❌ Sem Permissão",
+            description="Você não possui permissão para utilizar este comando.",
+            color=discord.Color.red()
+        )
+        return await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="📢 Informação",
+        description=mensagem,
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+
+    embed.set_footer(
+        text=f"Enviado por {interaction.user}"
+    )
+
+    await canal.send(embed=embed)
+
+    confirm = discord.Embed(
+        title="✅ Sucesso",
+        description=f"Informação enviada em {canal.mention}.",
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(
+        embed=confirm,
+        ephemeral=True
+    )
+
+@bot.tree.command(
+    name="cadastrar_cliente",
+    description="Cadastra um cliente."
+)
+@app_commands.describe(
+    cliente="Cliente",
+    item_id="ID do serviço adquirido",
+    data="Data da compra"
+)
+async def cadastrar_cliente(
+    interaction: discord.Interaction,
+    cliente: discord.Member,
+    item_id: int,
+    data: str
+):
+    if not possui_permissao(interaction.user):
+        embed = discord.Embed(
+            title="❌ Sem Permissão",
+            description="Você não possui permissão para utilizar este comando.",
+            color=discord.Color.red()
+        )
+        return await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    if item_id not in SERVICOS:
+        return await interaction.response.send_message(
+            "❌ ID de serviço inválido. Use `/consultar_servicos`.",
+            ephemeral=True
+        )
+
+    servico, valor = SERVICOS[item_id]
+
+    canal = bot.get_channel(CANAL_CADASTROS)
+
+    embed = discord.Embed(
+        title="📝 Novo Cadastro",
+        color=discord.Color.green(),
+        timestamp=datetime.now(GMT_MINUS_3)
+    )
+
+    embed.add_field(
+        name="👤 Cliente",
+        value=cliente.mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="🆔 ID do Sistema",
+        value=f"`{item_id:02d}`",
+        inline=True
+    )
+
+    embed.add_field(
+        name="📦 Serviço",
+        value=servico,
+        inline=True
+    )
+
+    embed.add_field(
+        name="💰 Valor",
+        value=valor,
+        inline=True
+    )
+
+    embed.add_field(
+        name="📅 Data",
+        value=data,
+        inline=False
+    )
+
+    embed.add_field(
+        name="👮 Responsável",
+        value=interaction.user.mention,
+        inline=False
+    )
+
+    if canal:
+        await canal.send(embed=embed)
+
+    CARGO_CLIENTE = 1519484107049013338
+
+    cargo = interaction.guild.get_role(CARGO_CLIENTE)
+
+    if cargo:
+        try:
+            await cliente.add_roles(
+                cargo,
+                reason=f"Cliente cadastrado por {interaction.user}"
+            )
+        except discord.Forbidden:
+            print("Sem permissão para adicionar o cargo.")
+        except discord.HTTPException as e:
+            print(f"Erro ao adicionar cargo: {e}")
+
+    confirm = discord.Embed(
+        title="✅ Cadastro Realizado",
+        description=f"{cliente.mention} foi cadastrado com sucesso.",
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(
+        embed=confirm,
+        ephemeral=True
+    )
+
+
+# ==========================
+# /cadastrar_pagamento
+# ==========================
+@bot.tree.command(
+    name="cadastrar_pagamento",
+    description="Registra um pagamento."
+)
+@app_commands.describe(
+    cliente="Cliente",
+    preco="Valor recebido",
+    tipo="Inicial ou Integral",
+    valor_sistema="Valor total do sistema",
+    comprovante="Comprovante do pagamento"
+)
+@app_commands.choices(
+    tipo=[
+        app_commands.Choice(name="Pagamento Inicial (50%)", value="Inicial"),
+        app_commands.Choice(name="Pagamento Integral (100%)", value="Integral")
+    ]
+)
+async def cadastrar_pagamento(
+    interaction: discord.Interaction,
+    cliente: discord.Member,
+    preco: float,
+    tipo: app_commands.Choice[str],
+    valor_sistema: float,
+    comprovante: discord.Attachment
+):
+
+    if not possui_permissao(interaction.user):
+        embed = discord.Embed(
+            title="❌ Sem Permissão",
+            description="Você não possui permissão para utilizar este comando.",
+            color=discord.Color.red()
+        )
+        return await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    canal = bot.get_channel(CANAL_PAGAMENTOS)
+
+    embed = discord.Embed(
+        title="💰 Novo Pagamento Registrado",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(GMT_MINUS_3)
+    )
+
+    embed.add_field(
+        name="👤 Cliente",
+        value=cliente.mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="💵 Valor Pago",
+        value=f"R$ {preco:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📦 Valor do Sistema",
+        value=f"R$ {valor_sistema:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📋 Tipo de Pagamento",
+        value=tipo.value,
+        inline=True
+    )
+
+    embed.add_field(
+        name="👮 Registrado por",
+        value=interaction.user.mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="🕒 Data",
+        value=f"<t:{int(datetime.now().timestamp())}:F>",
+        inline=False
+    )
+
+    embed.set_image(url=comprovante.url)
+
+    embed.set_footer(
+        text=f"ID do Cliente: {cliente.id}"
+    )
+
+    if canal:
+        await canal.send(embed=embed)
+
+    confirm = discord.Embed(
+        title="✅ Pagamento Registrado",
+        description=(
+            f"O pagamento de {cliente.mention} foi registrado com sucesso "
+            "e enviado ao canal de pagamentos."
+        ),
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(
+        embed=confirm,
+        ephemeral=True
+    )
+
+@bot.tree.command(
+    name="consultar_servicos",
+    description="Mostra todos os serviços disponíveis."
+)
+async def consultar_servicos(interaction: discord.Interaction):
+
+    embed = discord.Embed(
+        title="📋 Lista de Serviços",
+        description="Serviços disponíveis para cadastro:",
+        color=discord.Color.blue()
+    )
+
+    for item_id, (servico, valor) in SERVICOS.items():
+        embed.add_field(
+            name=f"ITEM ID {item_id:02d}",
+            value=f"**{servico}**\n💰 {valor}",
+            inline=False
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+# ==========================
+# /falar
+# ==========================
+@bot.tree.command(
+    name="falar",
+    description="Faz o bot falar em um canal."
+)
+@app_commands.describe(
+    canal="Canal onde será enviada a mensagem",
+    mensagem="Mensagem"
+)
+async def falar(
+    interaction: discord.Interaction,
+    canal: discord.TextChannel,
+    mensagem: str
+):
+    if not possui_permissao(interaction.user):
+        embed = discord.Embed(
+            title="❌ Sem Permissão",
+            description="Você não possui permissão para utilizar este comando.",
+            color=discord.Color.red()
+        )
+        return await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="💬 Mensagem",
+        description=mensagem,
+        color=discord.Color.purple(),
+        timestamp=datetime.utcnow()
+    )
+
+    embed.set_footer(
+        text=f"Solicitado por {interaction.user}"
+    )
+
+    await canal.send(embed=embed)
+
+    confirm = discord.Embed(
+        title="✅ Mensagem Enviada",
+        description=f"Mensagem enviada em {canal.mention}.",
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(
+        embed=confirm,
+        ephemeral=True
+    )
+
+# ==========================================
+# /cadastrar_servico
+# ==========================================
+
+@bot.tree.command(
+    name="cadastrar_servico",
+    description="Cadastra um novo serviço."
+)
+@app_commands.describe(
+    usuario="Cliente",
+    pacote="Pacote adquirido",
+    comandos="Comandos/sistemas solicitados",
+    link_servidor="Link do servidor",
+    prazo_entrega="Prazo de entrega",
+    descricao="Descrição do projeto"
+)
+async def cadastrar_servico(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+    pacote: str,
+    comandos: str,
+    link_servidor: str,
+    prazo_entrega: str,
+    descricao: str
+):
+
+    if not possui_permissao(interaction.user):
+        embed = discord.Embed(
+            title="❌ Sem Permissão",
+            description="Você não possui permissão para utilizar este comando.",
+            color=discord.Color.red()
+        )
+
+        return await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    canal = bot.get_channel(CANAL_SERVICOS)
+
+    if canal is None:
+        return await interaction.response.send_message(
+            "❌ Canal de serviços não encontrado.",
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="📋 Novo Serviço",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(GMT_MINUS_3)
+    )
+
+    embed.add_field(
+        name="👤 Cliente",
+        value=usuario.mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="📦 Pacote",
+        value=pacote,
+        inline=True
+    )
+
+    embed.add_field(
+        name="📅 Prazo de Entrega",
+        value=prazo_entrega,
+        inline=True
+    )
+
+    embed.add_field(
+        name="⚙️ Comandos",
+        value=comandos,
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔗 Link do Servidor",
+        value=link_servidor,
+        inline=False
+    )
+
+    embed.add_field(
+        name="📝 Descrição",
+        value=descricao,
+        inline=False
+    )
+
+    embed.add_field(
+        name="👮 Responsável",
+        value=interaction.user.mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="📌 Status",
+        value="⏳ Aguardando aprovação",
+        inline=False
+    )
+
+    embed.set_footer(
+        text=f"Cadastro realizado por {interaction.user}"
+    )
+
+    await canal.send(
+        embed=embed,
+        view=ServicoView()
+    )
+
+    confirm = discord.Embed(
+        title="✅ Serviço cadastrado",
+        description="O serviço foi enviado para análise com sucesso.",
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(
+        embed=confirm,
+        ephemeral=True
+    )
+
+bot.run(TOKEN)
